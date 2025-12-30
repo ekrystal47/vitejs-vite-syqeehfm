@@ -1,0 +1,1300 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import { 
+  LayoutDashboard, Wallet, Building2, Settings, LogOut, Sun, Moon, Menu, RefreshCw, 
+  CheckCircle2, Sparkles, ShieldCheck, TrendingDown, Medal, CreditCard as CardIcon, 
+  Info, TrendingUp, PiggyBank, RotateCcw, Flame, CreditCard, Trash2, Activity, History, Zap, ArrowLeftRight, Check, FlaskConical, XCircle, PieChart 
+} from 'lucide-react';
+import { onAuthStateChanged, signOut } from 'firebase/auth';
+import { 
+  collection, query, onSnapshot, addDoc, updateDoc, doc, serverTimestamp, 
+  runTransaction, orderBy, limit, getDoc, setDoc 
+} from 'firebase/firestore';
+
+// --- IMPORTS ---
+import { auth, db } from './lib/firebase'; 
+import { Money, getTodayStr, getNextDateStr, getPreviousDateStr, calculateDynamicAllocation, getAnnualAmount, countPaydaysInWindow, getOccurrencesInWindow, getReservedAmount } from './lib/finance';
+import AuthScreen from './components/modules/AuthScreen';
+import FireDashboard from './components/modules/FireDashboard';
+import PaydayWizard from './components/modules/PaydayWizard';
+import UnifiedEntryModal from './components/modules/UnifiedEntryModal';
+import BillCalendar from './components/modules/BillCalendar'; 
+import FlowVisualizer from './components/modules/FlowVisualizer'; 
+import ActionCenter from './components/modules/ActionCenter'; 
+import { StatCard, ItemCard } from './components/ui/Cards';
+import Confetti from './components/ui/Confetti'; 
+import { SpeedDial, PaydayBanner, CashFlowForecast, PartnerManager, LiquidityTrendChart, GameStats, TrophyCase } from './components/modules/Widgets'; 
+import { 
+  DailyAuditModal, CycleEndModal, SafeToSpendInfoModal, CreditPaymentModal, 
+  ReservedBreakdownModal, PartnerIncomeBreakdownModal, ToastContainer, ConfirmationModal 
+} from './components/modules/HelperModals';
+import TransactionHistoryModal from './components/modules/TransactionHistoryModal'; 
+import QuickLogModal from './components/modules/QuickLogModal'; 
+import DebtSimulatorModal from './components/modules/DebtSimulatorModal';
+import FundMoverModal from './components/modules/FundMoverModal'; 
+import BackupManager from './components/modules/BackupManager'; 
+import PayDebtModal from './components/modules/PayDebtModal'; 
+
+export default function App() {
+  const [user, setUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [darkMode, setDarkMode] = useState(false);
+  const [activeTab, setActiveTab] = useState('dashboard');
+  const [permissionError, setPermissionError] = useState(false);
+
+  // --- DATA STATE (LIVE) ---
+  const [liveAccounts, setLiveAccounts] = useState([]);
+  const [liveIncomes, setLiveIncomes] = useState([]);
+  const [liveExpenses, setLiveExpenses] = useState([]);
+  const [livePartners, setLivePartners] = useState([]);
+  const [snapshots, setSnapshots] = useState([]);
+  const [transactions, setTransactions] = useState([]); 
+  const [gameStats, setGameStats] = useState({ level: 1, xp: 0, streak: 0, lastAuditDate: '', nextLevelXP: 100, badges: [] });
+
+  // --- SIMULATION STATE ---
+  const [isSimMode, setIsSimMode] = useState(false);
+  const [simData, setSimData] = useState({ accounts: [], incomes: [], expenses: [], partners: [] });
+
+  // --- UI STATE ---
+  const [modalType, setModalType] = useState(null);
+  const [modalContext, setModalContext] = useState(null);
+  const [editingItem, setEditingItem] = useState(null);
+  const [showPayday, setShowPayday] = useState(false);
+  const [showCycleEnd, setShowCycleEnd] = useState(null);
+  const [showAudit, setShowAudit] = useState(false);
+  const [showSafeInfo, setShowSafeInfo] = useState(false);
+  const [breakdownModal, setBreakdownModal] = useState(null); 
+  const [breakdownIncome, setBreakdownIncome] = useState(null);
+  const [expandedId, setExpandedId] = useState(null);
+  const [payCardAccount, setPayCardAccount] = useState(null);
+  const [sortType, setSortType] = useState('date');
+  const [toasts, setToasts] = useState([]);
+  const [confirmState, setConfirmState] = useState({ isOpen: false });
+  const [showConfetti, setShowConfetti] = useState(false); 
+  
+  // Feature Modals
+  const [showQuickLog, setShowQuickLog] = useState(false);
+  const [showDebtSim, setShowDebtSim] = useState(false);
+  const [showFundMover, setShowFundMover] = useState(false);
+  const [payingDebtItem, setPayingDebtItem] = useState(null); 
+  const [historyView, setHistoryView] = useState({ isOpen: false, filterId: null, itemName: null });
+
+  // --- ACTIVE DATA ---
+  const accounts = isSimMode ? simData.accounts : liveAccounts;
+  const incomes = isSimMode ? simData.incomes : liveIncomes;
+  const expenses = isSimMode ? simData.expenses : liveExpenses;
+  const partners = isSimMode ? simData.partners : livePartners;
+
+  // --- ACTIONS ---
+  const addToast = (message, type = 'success') => {
+    const id = Date.now();
+    setToasts(prev => [...prev, { id, message, type }]);
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4000);
+  };
+
+  const confirmAction = (title, message, actionLabel, action) => {
+    setConfirmState({ isOpen: true, title, message, actionLabel, onConfirm: action });
+  };
+
+  // --- GAME ENGINE ---
+  const triggerConfetti = () => {
+      setShowConfetti(true);
+      if (navigator.vibrate) navigator.vibrate([100, 50, 100]); 
+      setTimeout(() => setShowConfetti(false), 3000);
+  };
+
+  const awardXP = async (amount) => {
+      if (isSimMode) return;
+      const newXP = gameStats.xp + amount;
+      let newLevel = gameStats.level;
+      let nextLevelXP = gameStats.nextLevelXP;
+
+      if (newXP >= nextLevelXP) {
+          newLevel += 1;
+          nextLevelXP = Math.floor(nextLevelXP * 1.5);
+          addToast(`LEVEL UP! You are now Level ${newLevel}! 🎉`, 'success');
+          triggerConfetti(); 
+      } else {
+          addToast(`+${amount} XP`, 'success');
+      }
+
+      let newBadges = [...(gameStats.badges || [])];
+      if (gameStats.streak >= 7 && !newBadges.includes('streak_7')) {
+          newBadges.push('streak_7');
+          addToast('BADGE UNLOCKED: 7 Day Streak! 🔥', 'success');
+      }
+
+      const newStats = { ...gameStats, level: newLevel, xp: newXP, nextLevelXP, badges: newBadges };
+      setGameStats(newStats);
+      await updateDoc(doc(db, 'users', user.uid, 'settings', 'gameStats'), newStats);
+  };
+
+  const checkStreak = async (stats) => {
+      const today = getTodayStr();
+      const lastAudit = stats.lastAuditDate;
+      let newStreak = stats.streak;
+
+      if (lastAudit === today) return; 
+
+      const yesterday = new Date();
+      yesterday.setDate(yesterday.getDate() - 1);
+      const yesterdayStr = yesterday.toISOString().split('T')[0];
+
+      if (lastAudit !== yesterdayStr && lastAudit !== today) {
+          if (newStreak > 0) {
+              newStreak = 0;
+              setGameStats(prev => ({ ...prev, streak: 0 }));
+          }
+      }
+  };
+
+  const toggleSimMode = () => {
+    if (!isSimMode) {
+      setSimData({
+        accounts: JSON.parse(JSON.stringify(liveAccounts)),
+        incomes: JSON.parse(JSON.stringify(liveIncomes)),
+        expenses: JSON.parse(JSON.stringify(liveExpenses)),
+        partners: JSON.parse(JSON.stringify(livePartners))
+      });
+      setIsSimMode(true);
+      addToast("Entering Simulator Mode", "success");
+    } else {
+      setIsSimMode(false);
+      setSimData({ accounts: [], incomes: [], expenses: [], partners: [] });
+      addToast("Simulation Ended. Data Reverted.", "success");
+    }
+  };
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      setAuthLoading(false);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!user) {
+      setLiveAccounts([]); setLiveIncomes([]); setLiveExpenses([]); setLivePartners([]); setSnapshots([]); setTransactions([]);
+      return;
+    }
+    const getPath = (col) => collection(db, 'users', user.uid, col);
+    const unsubAccounts = onSnapshot(query(getPath('accounts')), (snap) => setLiveAccounts(snap.docs.map(d => ({id: d.id, ...d.data()})).filter(d => !d.deletedAt)));
+    const unsubIncomes = onSnapshot(query(getPath('incomes')), (snap) => setLiveIncomes(snap.docs.map(d => ({id: d.id, ...d.data()})).filter(d => !d.deletedAt)));
+    const unsubExpenses = onSnapshot(query(getPath('expenses')), (snap) => setLiveExpenses(snap.docs.map(d => ({id: d.id, ...d.data()})).filter(d => !d.deletedAt)));
+    const unsubPartners = onSnapshot(query(getPath('partners')), (snap) => setLivePartners(snap.docs.map(d => ({id: d.id, ...d.data()})).filter(d => !d.deletedAt)));
+    const unsubSnapshots = onSnapshot(query(getPath('history_snapshots')), (snap) => setSnapshots(snap.docs.map(d => d.data())));
+    
+    const unsubGame = onSnapshot(doc(db, 'users', user.uid, 'settings', 'gameStats'), (doc) => {
+        if (doc.exists()) {
+            const stats = doc.data();
+            setGameStats(stats);
+            checkStreak(stats);
+        } else {
+            const initStats = { level: 1, xp: 0, streak: 0, lastAuditDate: '', nextLevelXP: 100, badges: [] };
+            setDoc(doc.ref, initStats);
+            setGameStats(initStats);
+        }
+    });
+
+    const unsubTransactions = onSnapshot(query(getPath('transactions'), orderBy('createdAt', 'desc'), limit(100)), (snap) => {
+        setTransactions(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    });
+
+    return () => { unsubAccounts(); unsubIncomes(); unsubExpenses(); unsubPartners(); unsubSnapshots(); unsubTransactions(); unsubGame(); };
+  }, [user]);
+
+  // --- DERIVED INCOMES ---
+  const derivedIncomes = useMemo(() => {
+    const realIncomes = incomes.filter(i => !i.isDerived);
+    const partnerIncomes = partners.map(p => {
+      const partnerExpenses = expenses.filter(e => e.splitConfig && e.splitConfig.partnerId === p.id && !e.deletedAt);
+      let totalNextCheck = 0;
+      const contributingItems = [];
+      const partnerPayDate = p.nextPayDate || getTodayStr();
+      const partnerFreq = p.payFrequency || 'Biweekly';
+
+      partnerExpenses.forEach(e => {
+        const partnerShare = e.splitConfig.partnerAmount || 0;
+        let cycleEnd = e.date || e.dueDate || e.nextDate;
+        if (!cycleEnd) return;
+
+        const occs = getOccurrencesInWindow(cycleEnd, e.frequency, partnerPayDate, 365);
+        let targetDueDate = occs.find(d => d >= partnerPayDate); 
+        if (!targetDueDate) targetDueDate = cycleEnd; 
+
+        const targetStartDate = getPreviousDateStr(targetDueDate, e.frequency);
+        const paydaysInCycle = countPaydaysInWindow(targetStartDate, targetDueDate, partnerPayDate, partnerFreq);
+        const amountForThisCheck = Math.round(partnerShare / (paydaysInCycle || 1));
+
+        totalNextCheck += amountForThisCheck;
+
+        contributingItems.push({ 
+            name: e.name, 
+            amount: partnerShare, 
+            calculatedAmount: amountForThisCheck, 
+            frequency: e.frequency, 
+            isOwedOnly: e.splitConfig.isOwedOnly,
+            paydaysInCycle: paydaysInCycle,
+            dueDate: targetDueDate,
+            currentBalance: e.currentBalance 
+        });
+      });
+
+      if (totalNextCheck === 0) return null;
+
+      return {
+        id: `virtual-${p.id}`, 
+        name: `${p.name} (Split Reimbursement)`, 
+        amount: totalNextCheck, 
+        frequency: partnerFreq, 
+        nextDate: partnerPayDate,
+        accountId: p.depositAccountId || accounts.find(a => a.type==='checking')?.id,
+        isDerived: true, 
+        isPrimary: false, 
+        breakdownItems: contributingItems, 
+        totalAnnual: 0 
+      };
+    }).filter(Boolean);
+
+    return [...realIncomes, ...partnerIncomes];
+  }, [incomes, partners, expenses, accounts]);
+
+  useEffect(() => {
+    if (darkMode) document.documentElement.classList.add('dark');
+    else document.documentElement.classList.remove('dark');
+  }, [darkMode]);
+
+  const handlePaydayComplete = async (completed, incomeId) => {
+      setShowPayday(false);
+      if (!completed) return; 
+
+      let targetIncome = null;
+      if (incomeId && incomeId.startsWith('virtual-')) {
+          targetIncome = derivedIncomes.find(i => i.id === incomeId);
+      } else {
+          targetIncome = incomeId ? incomes.find(i => i.id === incomeId) : (incomes.find(i => i.isPrimary) || incomes[0]);
+      }
+
+      if (!targetIncome) return;
+
+      const today = getTodayStr();
+      let nextDate = getNextDateStr(targetIncome.nextDate || today, targetIncome.frequency);
+      
+      if (nextDate < today) {
+          nextDate = getNextDateStr(today, targetIncome.frequency);
+      }
+      
+      const isPartnerIncome = targetIncome.isDerived && targetIncome.id.startsWith('virtual-');
+
+      if (isSimMode) {
+          setSimData(prev => {
+              if (isPartnerIncome) {
+                  const partnerId = targetIncome.id.replace('virtual-', '');
+                  return {
+                      ...prev,
+                      partners: prev.partners.map(p => p.id === partnerId ? { ...p, nextPayDate: nextDate } : p)
+                  };
+              } else {
+                  return {
+                      ...prev,
+                      incomes: prev.incomes.map(i => i.id === targetIncome.id ? { ...i, nextDate } : i)
+                  };
+              }
+          });
+          addToast("Date Advanced (Sim)");
+      } else {
+          try {
+              if (isPartnerIncome) {
+                  const partnerId = targetIncome.id.replace('virtual-', '');
+                  await updateDoc(doc(db, 'users', user.uid, 'partners', partnerId), { nextPayDate: nextDate }); 
+                  addToast("Partner Pay Date Advanced");
+              } else {
+                  await updateDoc(doc(db, 'users', user.uid, 'incomes', targetIncome.id), { nextDate });
+                  addToast("Income Date Advanced");
+              }
+              awardXP(100); 
+              triggerConfetti(); 
+          } catch (e) {
+              addToast("Failed to advance date: " + e.message, "error");
+          }
+      }
+  };
+
+  const handleAddItem = async (type, data) => {
+    if (isSimMode) {
+        const newItem = { ...data, id: `sim-${Date.now()}`, createdAt: new Date() };
+        if ((type === 'expense' || type === 'bill' || type === 'variable') && data.splitConfig && data.splitConfig.isSplit) {
+             const total = data.amount;
+             const partnerAmt = data.splitConfig.partnerAmount || 0;
+             if (data.splitConfig.payer === 'partner') newItem.amount = total - partnerAmt;
+        }
+        setSimData(prev => {
+            const key = type === 'income' ? 'incomes' : type === 'partner' ? 'partners' : type === 'account' || type === 'checking' || type === 'credit' ? 'accounts' : 'expenses';
+            return { ...prev, [key]: [...prev[key], newItem] };
+        });
+        addToast(editingItem ? "Updated (Sim)" : "Added (Sim)");
+        setModalType(null); setModalContext(null); setEditingItem(null);
+        return;
+    }
+
+    if (!user) return;
+    let collectionName = 'expenses';
+    if (type === 'income') collectionName = 'incomes';
+    if (type === 'account') collectionName = 'accounts';
+    if (type === 'partner') collectionName = 'partners';
+    const payload = { ...data, updatedAt: serverTimestamp() };
+    if (collectionName === 'accounts') {
+      let specificType = data.accountType || data.type || 'checking';
+      if(specificType === 'account') specificType = 'checking';
+      payload.type = specificType.toLowerCase();
+    } else { payload.type = type; }
+
+    if (collectionName === 'expenses' && data.splitConfig && data.splitConfig.isSplit) {
+      const totalAmount = data.amount;
+      const partnerAmount = data.splitConfig.partnerAmount || 0;
+      const myAmount = totalAmount - partnerAmount;
+      if (data.splitConfig.payer === 'me') payload.amount = totalAmount; 
+      else payload.amount = myAmount;
+    }
+    const userColRef = (col) => collection(db, 'users', user.uid, col);
+    const userDocRef = (col, id) => doc(db, 'users', user.uid, col, id);
+    try {
+      if (editingItem) {
+        await updateDoc(userDocRef(collectionName, editingItem.id), payload);
+        addToast(`Updated ${payload.name}`);
+        setEditingItem(null);
+      } else {
+        await addDoc(userColRef(collectionName), { ...payload, createdAt: serverTimestamp() });
+        addToast(`Added ${payload.name}`);
+        awardXP(5); 
+      }
+    } catch (e) {
+      if (e.code === 'permission-denied') setPermissionError(true);
+      else addToast(`Error: ${e.message}`, 'error');
+    }
+    setModalType(null); setModalContext(null);
+  };
+
+  const handleDelete = async (id, type) => {
+    if (isSimMode) {
+        setSimData(prev => {
+            const key = type === 'income' ? 'incomes' : type === 'partner' ? 'partners' : ['account','checking','savings','credit'].includes(type) ? 'accounts' : 'expenses';
+            return { ...prev, [key]: prev[key].filter(i => i.id !== id) };
+        });
+        addToast("Item Deleted (Sim)");
+        return;
+    }
+
+    confirmAction("Delete Item", "This will move the item to trash.", "Delete", async () => {
+      if (!user) return;
+      let collectionName = 'expenses';
+      if (type === 'income') collectionName = 'incomes';
+      if (['account','checking','savings','credit','investment','loan'].includes(type)) collectionName = 'accounts';
+      if (type === 'partner') collectionName = 'partners';
+      try {
+        await updateDoc(doc(db, 'users', user.uid, collectionName, id), { deletedAt: serverTimestamp() });
+        addToast("Item deleted");
+      } catch(e) { addToast("Failed to delete", 'error'); }
+    });
+  };
+
+  const handleAtomicPayment = async (creditAccountId, sourceAccountId, amountCents) => {
+    if (isSimMode) {
+        setSimData(prev => {
+            const newAccounts = prev.accounts.map(a => {
+                if (a.id === creditAccountId) return { ...a, currentBalance: (a.currentBalance || 0) + amountCents };
+                if (a.id === sourceAccountId) return { ...a, currentBalance: (a.currentBalance || 0) - amountCents };
+                return a;
+            });
+            return { ...prev, accounts: newAccounts };
+        });
+        addToast("Payment Processed (Sim)");
+        return;
+    }
+
+    if (!user) return;
+    try {
+      await runTransaction(db, async (transaction) => {
+        const creditRef = doc(db, 'users', user.uid, 'accounts', creditAccountId);
+        const sourceRef = doc(db, 'users', user.uid, 'accounts', sourceAccountId);
+        const transRef = doc(collection(db, 'users', user.uid, 'transactions')); 
+
+        const creditDoc = await transaction.get(creditRef);
+        const sourceDoc = await transaction.get(sourceRef);
+        
+        if (!creditDoc.exists() || !sourceDoc.exists()) throw new Error("Account does not exist!");
+        
+        transaction.update(creditRef, { currentBalance: (creditDoc.data().currentBalance || 0) + amountCents });
+        transaction.update(sourceRef, { currentBalance: (sourceDoc.data().currentBalance || 0) - amountCents });
+
+        transaction.set(transRef, {
+            createdAt: serverTimestamp(),
+            amount: -amountCents,
+            type: 'payment',
+            itemId: creditAccountId,
+            itemName: `Paid ${creditDoc.data().name}`,
+            description: `Payment from ${sourceDoc.data().name}`
+        });
+      });
+      addToast("Payment Processed Successfully");
+      awardXP(20); 
+    } catch (e) { addToast("Payment Failed! No funds moved.", 'error'); }
+  };
+
+  const handleFundTransfer = async (sourceId, targetId, amount) => {
+    if (isSimMode) {
+        setSimData(prev => {
+            const newExpenses = prev.expenses.map(e => {
+                if (e.id === sourceId) return { ...e, currentBalance: (e.currentBalance || 0) - amount };
+                if (e.id === targetId) return { ...e, currentBalance: (e.currentBalance || 0) + amount };
+                return e;
+            });
+            return { ...prev, expenses: newExpenses };
+        });
+        addToast("Funds Moved (Sim)");
+        return;
+    }
+
+    if (!user) return;
+    try {
+      await runTransaction(db, async (transaction) => {
+        const sourceRef = doc(db, 'users', user.uid, 'expenses', sourceId);
+        const targetRef = doc(db, 'users', user.uid, 'expenses', targetId);
+        const sourceLogRef = doc(collection(db, 'users', user.uid, 'transactions')); 
+        const targetLogRef = doc(collection(db, 'users', user.uid, 'transactions')); 
+
+        const sourceDoc = await transaction.get(sourceRef);
+        const targetDoc = await transaction.get(targetRef);
+
+        if (!sourceDoc.exists() || !targetDoc.exists()) throw new Error("Bucket not found!");
+
+        const newSourceBal = (sourceDoc.data().currentBalance || 0) - amount;
+        const newTargetBal = (targetDoc.data().currentBalance || 0) + amount;
+
+        transaction.update(sourceRef, { currentBalance: newSourceBal });
+        transaction.update(targetRef, { currentBalance: newTargetBal });
+
+        transaction.set(sourceLogRef, { createdAt: serverTimestamp(), amount: -amount, type: 'transfer_out', itemId: sourceId, itemName: sourceDoc.data().name, description: `Transfer to ${targetDoc.data().name}` });
+        transaction.set(targetLogRef, { createdAt: serverTimestamp(), amount: amount, type: 'transfer_in', itemId: targetId, itemName: targetDoc.data().name, description: `Transfer from ${sourceDoc.data().name}` });
+      });
+      addToast("Funds Moved Successfully");
+    } catch (e) { addToast("Transfer Failed: " + e.message, 'error'); }
+  };
+
+  const handleAuditComplete = async () => {
+    if (isSimMode) {
+        addToast("Audit Logged (Sim - Not Saved)");
+        setShowAudit(false);
+        return;
+    }
+
+    setShowAudit(false);
+    if (!user) return;
+    let totalLiquid = 0;
+    let netWorth = 0;
+    accounts.forEach(acc => {
+        const bal = acc.currentBalance || 0;
+        if (['checking', 'savings', 'cash'].includes(acc.type)) totalLiquid += bal;
+        if (acc.type === 'credit' || acc.type === 'loan') netWorth -= Math.abs(bal);
+        else netWorth += bal;
+    });
+    try {
+        await addDoc(collection(db, 'users', user.uid, 'history_snapshots'), { date: new Date().toISOString(), totalLiquid, netWorth });
+        
+        // GAME: Streak Logic
+        const today = getTodayStr();
+        const lastAudit = gameStats.lastAuditDate;
+        let newStreak = gameStats.streak;
+        
+        if (lastAudit !== today) {
+            newStreak += 1;
+            const newStats = { ...gameStats, streak: newStreak, lastAuditDate: today, xp: gameStats.xp + 50 };
+            if (newStats.xp >= newStats.nextLevelXP) {
+                newStats.level += 1;
+                newStats.nextLevelXP = Math.floor(newStats.nextLevelXP * 1.5);
+                addToast(`LEVEL UP! Level ${newStats.level}`, 'success');
+                triggerConfetti();
+            }
+            setGameStats(newStats);
+            await updateDoc(doc(db, 'users', user.uid, 'settings', 'gameStats'), newStats);
+            addToast(`Audit Complete! ${newStreak} Day Streak! 🔥`);
+        } else {
+             addToast("Audit Updated");
+        }
+        
+    } catch (e) { console.error("Snapshot failed", e); }
+  };
+
+  // --- NEW: CLEAR TRANSACTION LOGIC (Finalizes Pending) ---
+  const handleClearTransaction = async (item) => {
+      if (isSimMode) return;
+      if (!user) return;
+
+      try {
+          if (item.type === 'debt') {
+              // FOR DEBT: Funds leave Checking Account NOW
+              await runTransaction(db, async (transaction) => {
+                  const expenseRef = doc(db, 'users', user.uid, 'expenses', item.id);
+                  if (!item.accountId) throw new Error("Source Account ID missing.");
+                  const checkingRef = doc(db, 'users', user.uid, 'accounts', item.accountId); 
+                  
+                  const checkingDoc = await transaction.get(checkingRef);
+                  if (!checkingDoc.exists()) throw new Error("Source Account not found");
+                  
+                  const expDoc = await transaction.get(expenseRef);
+                  const expData = expDoc.data();
+
+                  // HYBRID FIX: If it has pendingPayment use it. If not, use amount (for Fixed Loan-like Debts)
+                  const pendingAmount = expData.pendingPayment || expData.amount || 0;
+                  
+                  const newCheckingBal = (checkingDoc.data().currentBalance || 0) - pendingAmount;
+
+                  // 1. Remove pending flag from debt
+                  // If it's a fixed loan-like debt (amount > 0, no target), reset isPaid/Date
+                  const updates = { pendingPayment: 0 };
+                  if (expData.amount > 0 && !expData.targetBalance) {
+                       const nextDate = getNextDateStr(expData.date || expData.dueDate, expData.frequency);
+                       updates.isPaid = false;
+                       updates.isCleared = false; // Reset for next cycle
+                       if (expData.date) updates.date = nextDate;
+                       else updates.dueDate = nextDate;
+                  }
+                  
+                  transaction.update(expenseRef, updates);
+                  
+                  // 2. Reduce Checking Balance
+                  transaction.update(checkingRef, { currentBalance: newCheckingBal });
+              });
+              addToast("Debt Payment Cleared - Funds Deducted");
+          } else if (['bill', 'loan'].includes(item.type)) { 
+              // FOR BILLS/LOANS
+              await runTransaction(db, async (transaction) => {
+                  const expenseRef = doc(db, 'users', user.uid, 'expenses', item.id);
+                  const checkingRef = doc(db, 'users', user.uid, 'accounts', item.accountId);
+
+                  const checkingDoc = await transaction.get(checkingRef);
+                  const expDoc = await transaction.get(expenseRef);
+                  if (!checkingDoc.exists() || !expDoc.exists()) throw new Error("Data missing");
+                  
+                  const expData = expDoc.data();
+
+                  // Deduct
+                  const newBal = (checkingDoc.data().currentBalance || 0) - item.amount;
+                  transaction.update(checkingRef, { currentBalance: newBal });
+                  
+                  // Advance Date & Reset
+                  const nextDate = getNextDateStr(expData.date || expData.dueDate, expData.frequency);
+                  if (expData.date) transaction.update(expenseRef, { date: nextDate, isPaid: false, isCleared: false });
+                  else transaction.update(expenseRef, { dueDate: nextDate, isPaid: false, isCleared: false });
+              });
+
+              addToast("Transaction Verified & Date Advanced");
+          }
+      } catch (e) {
+          addToast("Failed to clear: " + e.message, 'error');
+      }
+  };
+
+  // --- REWRITTEN: PAY CARD LOGIC (Enters Pending State) ---
+  const handleConfirmPayCard = async (bucketId, amountCents) => {
+    if (isSimMode) return;
+
+    if (!user) return;
+    try {
+        const bucket = expenses.find(e => e.id === bucketId);
+        if (!bucket || !bucket.totalDebtBalance) return;
+        
+        await runTransaction(db, async (transaction) => {
+            const bucketRef = doc(db, 'users', user.uid, 'expenses', bucketId);
+            const creditRef = doc(db, 'users', user.uid, 'accounts', bucket.totalDebtBalance);
+
+            const bucketDoc = await transaction.get(bucketRef);
+            const creditDoc = await transaction.get(creditRef);
+
+            if (!bucketDoc.exists() || !creditDoc.exists()) throw new Error("Data missing.");
+
+            transaction.update(bucketRef, { 
+                currentBalance: (bucketDoc.data().currentBalance || 0) - amountCents,
+                pendingPayment: (bucketDoc.data().pendingPayment || 0) + amountCents 
+            });
+
+            transaction.update(creditRef, { currentBalance: (creditDoc.data().currentBalance || 0) + amountCents });
+
+            const transRef = doc(collection(db, 'users', user.uid, 'transactions'));
+            transaction.set(transRef, {
+                createdAt: serverTimestamp(),
+                amount: -amountCents,
+                type: 'payment',
+                itemId: bucketId,
+                itemName: bucket.name,
+                description: `Payment Sent (Pending Clearance)`
+            });
+        });
+        addToast("Payment Sent! Funds marked Pending.");
+        awardXP(50);
+    } catch (e) { addToast("Payment Failed: " + e.message, 'error'); }
+  };
+
+  const updateExpense = async (id, field, value) => {
+    if (isSimMode) {
+        setSimData(prev => { return prev; }); 
+        addToast("Updated (Sim)");
+        return;
+    }
+
+    if (!user) return;
+    
+    const expenseItem = expenses.find(e => e.id === id);
+    if (!expenseItem) return;
+    const accountId = expenseItem.accountId;
+    const linkedDebtBucket = expenses.find(e => e.type === 'debt' && e.totalDebtBalance === accountId && !e.deletedAt);
+
+    try {
+      if (field === 'spent' || field === 'isPaid' || field === 'addedFunds' || field === 'isCleared') {
+        
+        const expRef = doc(db, 'users', user.uid, 'expenses', id);
+        const transRef = doc(collection(db, 'users', user.uid, 'transactions')); 
+        const accRef = accountId ? doc(db, 'users', user.uid, 'accounts', accountId) : null;
+        const debtRef = linkedDebtBucket ? doc(db, 'users', user.uid, 'expenses', linkedDebtBucket.id) : null;
+
+        await runTransaction(db, async (transaction) => {
+          const expDoc = await transaction.get(expRef);
+          if(!expDoc.exists()) throw "Expense not found";
+          const exp = expDoc.data();
+
+          let accDoc = null;
+          if (accRef) accDoc = await transaction.get(accRef);
+
+          let debtDoc = null;
+          if (debtRef) debtDoc = await transaction.get(debtRef);
+
+          let currentBucketBal = exp.currentBalance || 0;
+          let logAmount = 0;
+          let logType = '';
+          let newAccBal = accDoc && accDoc.exists() ? (accDoc.data().currentBalance || 0) : 0;
+          let debtBucketBal = debtDoc && debtDoc.exists() ? (debtDoc.data().currentBalance || 0) : 0;
+          const isCreditAccount = accDoc && accDoc.exists() && accDoc.data().type === 'credit';
+
+          if (field === 'addedFunds') {
+            currentBucketBal += value;
+            logAmount = value;
+            logType = 'deposit';
+            transaction.update(expRef, { currentBalance: currentBucketBal });
+          }
+
+          else if (field === 'spent') {
+            currentBucketBal -= value;
+            logAmount = -value;
+            logType = 'expense';
+            transaction.update(expRef, { currentBalance: currentBucketBal });
+
+            if (accDoc && accDoc.exists()) {
+                newAccBal -= value;
+                transaction.update(accRef, { currentBalance: newAccBal });
+            }
+
+            if (isCreditAccount && debtDoc && debtDoc.exists()) {
+                debtBucketBal += value;
+                transaction.update(debtRef, { currentBalance: debtBucketBal });
+            }
+          }
+
+          else if (field === 'isPaid' && value === true) {
+             const amountToPay = exp.amount || 0;
+             // NOTE: We do NOT deduct from Account yet. Pending Clearance logic applies.
+             // If paying FROM a credit card, move to debt bucket immediately (that doesn't wait)
+             if (isCreditAccount && debtDoc && debtDoc.exists()) {
+                 debtBucketBal += amountToPay;
+                 transaction.update(debtRef, { currentBalance: debtBucketBal });
+             }
+
+             // CRITICAL FIX: DO NOT ADVANCE DATE YET.
+             // Just mark paid and uncleared.
+             transaction.update(expRef, { isPaid: true, isCleared: false });
+
+             logAmount = -amountToPay;
+             logType = 'bill_paid';
+          }
+
+          if (logType) {
+             transaction.set(transRef, {
+                 createdAt: serverTimestamp(),
+                 amount: logAmount,
+                 type: logType,
+                 itemId: id,
+                 itemName: exp.name,
+                 description: field === 'spent' && isCreditAccount ? 'Spent on Credit (Funds Reserved)' : 'Transaction Logged'
+             });
+          }
+        });
+        
+        if (field === 'spent') {
+            addToast("Transaction Logged");
+            awardXP(5);
+        }
+        else if (field === 'isPaid') {
+            addToast("Marked Paid (Pending Clearance)");
+            awardXP(10);
+            if (navigator.vibrate) navigator.vibrate(200); 
+        }
+        else addToast("Updated Successfully");
+
+      } else {
+        await updateDoc(doc(db, 'users', user.uid, 'expenses', id), { [field]: value });
+      }
+    } catch (e) { addToast("Update failed: " + e.message, 'error'); }
+  };
+
+  const updateAccount = async (id, field, value) => {
+    if (isSimMode) {
+        setSimData(prev => ({
+            ...prev,
+            accounts: prev.accounts.map(a => a.id === id ? { ...a, [field]: value } : a)
+        }));
+        addToast("Account Updated (Sim)");
+        return;
+    }
+    if (!user) return;
+    await updateDoc(doc(db, 'users', user.uid, 'accounts', id), { [field]: value });
+  };
+
+  // --- CALCULATIONS ---
+  const totalDebt = useMemo(() => {
+    let debt = 0;
+    accounts.forEach(a => {
+      if(a.type === 'credit') debt += Math.abs(Math.min(0, a.currentBalance || 0));
+      if(a.type === 'loan') debt += (a.currentBalance || 0);
+    });
+    return debt;
+  }, [accounts]);
+
+  const transferStrategy = useMemo(() => {
+    const s = {};
+    accounts.forEach(a => s[a.id] = { requiredBalance: 0, pendingBalance: 0, totalFlow: 0, items: [], heldForCredit: 0, reservedItems: [] });
+    const primaryIncome = incomes.find(i => i.isPrimary) || incomes[0];
+    
+    // UPDATED: Use the new centralized helper that accounts for PENDING items
+    const reservedTotal = getReservedAmount(expenses, null); 
+
+    expenses.forEach(e => {
+      if (e.splitConfig?.isOwedOnly) return;
+      
+      // CRITICAL FIX: If item is cleared, SKIP IT from reserved strategy immediately
+      if (e.isCleared) return;
+      
+      const targetAcc = accounts.find(a => a.id === e.accountId);
+      if(!targetAcc) return;
+      
+      const dynamicAlloc = calculateDynamicAllocation(e, primaryIncome);
+      if(s[e.accountId]) s[e.accountId].totalFlow += dynamicAlloc;
+      
+      // RESERVED CALCULATION (Now includes Pending)
+      let currentRes = 0;
+      let isPending = false;
+
+      // 1. Pending (In Transit)
+      if (e.isPaid && !e.isCleared) {
+          isPending = true;
+          if (['bill', 'loan'].includes(e.type)) currentRes = e.amount;
+          else if (e.type === 'debt') currentRes = (e.pendingPayment || e.amount || 0);
+      } 
+      // 2. Allocated (Sitting in Bucket)
+      else {
+          if (['bill', 'loan'].includes(e.type)) currentRes = e.amount;
+          else if (e.type === 'debt' && e.amount > 0 && !e.targetBalance) currentRes = e.amount;
+          else currentRes = e.currentBalance || 0;
+      }
+
+      if(targetAcc.type === 'credit' && targetAcc.linkedAccountId) {
+        const backingId = targetAcc.linkedAccountId;
+        if(s[backingId]) {
+          if (currentRes > 0) {
+            s[backingId].heldForCredit += currentRes;
+            s[backingId].reservedItems.push({ 
+                id: e.id, 
+                name: `${e.name} (Credit)`, 
+                amount: currentRes, 
+                type: 'Credit Hold',
+                originalType: e.type,
+                accountId: backingId,
+                pendingPayment: e.pendingPayment
+            });
+          }
+        }
+      }
+      if(targetAcc.type !== 'credit') {
+        if(isPending) s[e.accountId].pendingBalance += currentRes;
+        else s[e.accountId].requiredBalance += currentRes;
+
+        if(currentRes > 0) s[e.accountId].reservedItems.push({ 
+            id: e.id, 
+            name: e.name, 
+            amount: currentRes, 
+            type: isPending ? 'Pending Clearance' : e.type,
+            originalType: e.type,
+            accountId: e.accountId, 
+            pendingPayment: e.pendingPayment
+        });
+      }
+    });
+    return s;
+  }, [expenses, accounts, incomes]);
+
+  const safeToSpend = useMemo(() => {
+    let totalSafe = 0;
+    accounts.filter(a => a.type === 'checking').forEach(acc => {
+      const strat = transferStrategy[acc.id];
+      const reserved = strat ? (strat.requiredBalance + strat.pendingBalance + strat.heldForCredit) : 0;
+      const free = (acc.currentBalance || 0) - reserved;
+      if (free > 0) totalSafe += free;
+    });
+    return totalSafe;
+  }, [accounts, transferStrategy]);
+
+  // Sorting
+  const sortedAccounts = useMemo(() => {
+    const typeOrder = { 'checking': 0, 'credit': 1, 'loan': 2, 'savings': 3, 'investment': 4 };
+    return [...accounts].sort((a, b) => {
+      const typeA = typeOrder[(a.type || '').toLowerCase()] ?? 99;
+      const typeB = typeOrder[(b.type || '').toLowerCase()] ?? 99;
+      if (typeA !== typeB) return typeA - typeB;
+      return (a.order || 0) - (b.order || 0);
+    });
+  }, [accounts]);
+
+  const sortedExpenses = useMemo(() => {
+    return [...expenses].sort((a,b) => {
+      if(sortType === 'amount') return (b.amount || 0) - (a.amount || 0);
+      if(sortType === 'frequency') {
+        const order = { 'Weekly': 1, 'Biweekly': 2, 'Twice a Month': 3, 'Monthly': 4, 'Quarterly': 5, 'Annually': 6 };
+        return (order[a.frequency] || 99) - (order[b.frequency] || 99);
+      }
+      if(sortType === 'account') return (a.accountId || '').localeCompare(b.accountId || '');
+      return new Date(a.date || a.nextDate) - new Date(b.date || b.nextDate);
+    });
+  }, [expenses, sortType]);
+
+  const subBleed = useMemo(() => expenses.filter(e => e.isSubscription).reduce((sum, e) => sum + getAnnualAmount(e.amount, e.frequency)/12, 0), [expenses]);
+
+  if (authLoading) return <div className="min-h-screen bg-slate-900 flex items-center justify-center text-white"><RefreshCw className="animate-spin mr-2"/> Loading OneViewPro...</div>;
+  if (!user) return <AuthScreen />;
+
+  return (
+    <div className={`min-h-screen font-sans transition-colors duration-300 text-slate-900 dark:text-slate-100 ${isSimMode ? 'bg-indigo-50 dark:bg-slate-950 border-[8px] border-indigo-500' : 'bg-slate-50 dark:bg-slate-950'}`}>
+      
+      {/* SIMULATION BANNER */}
+      {isSimMode && (
+        <div className="fixed top-0 left-0 w-full z-[100] bg-indigo-600 text-white text-center py-1 font-bold text-xs shadow-lg flex items-center justify-center gap-2">
+            <FlaskConical size={14} className="animate-pulse"/> SIMULATION MODE ACTIVE - DATA WILL NOT BE SAVED
+            <button onClick={toggleSimMode} className="ml-4 bg-white text-indigo-600 px-2 rounded-full text-[10px] hover:bg-indigo-50 flex items-center gap-1"><XCircle size={10}/> EXIT</button>
+        </div>
+      )}
+
+      {/* CONFETTI OVERLAY */}
+      <Confetti isActive={showConfetti} />
+
+      {/* SIDEBAR */}
+      <aside className={`fixed top-0 left-0 z-30 h-full w-64 bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-slate-800 transform transition-transform duration-300 lg:translate-x-0 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}>
+        <div className={`h-20 flex items-center px-8 border-b border-slate-200 dark:border-slate-800 ${isSimMode ? 'pt-6' : ''}`}>
+          <div className="flex items-center gap-2 text-emerald-600 dark:text-emerald-400 font-bold text-xl"><Wallet className="w-8 h-8" /><span>OneView<span className="text-slate-900 dark:text-white">Pro</span></span></div>
+        </div>
+        <nav className="p-4 space-y-1">
+          {[
+            { id: 'dashboard', label: 'Overview', icon: LayoutDashboard }, 
+            { id: 'insights', label: 'Insights', icon: PieChart }, 
+            { id: 'fire', label: 'Independence', icon: Flame }, 
+            { id: 'budget', label: 'Budget Plan', icon: Wallet }, 
+            { id: 'accounts', label: 'Accounts', icon: Building2 }, 
+            { id: 'settings', label: 'Settings', icon: Settings }
+          ].map((item) => (
+            <button key={item.id} onClick={() => { setActiveTab(item.id); setSidebarOpen(false); }} className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${activeTab === item.id ? 'bg-emerald-50 text-emerald-600 dark:bg-emerald-900/20 dark:text-emerald-400 font-semibold' : 'text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'}`}><item.icon className="w-5 h-5" /> {item.label}</button>
+          ))}
+        </nav>
+        <div className="absolute bottom-0 w-full p-4 border-t border-slate-200 dark:border-slate-800">
+          <button onClick={() => signOut(auth)} className="w-full flex items-center gap-3 px-4 py-3 text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-xl transition-all mb-2"><LogOut className="w-5 h-5"/> Sign Out</button>
+          <button onClick={() => setDarkMode(!darkMode)} className="w-full flex items-center gap-3 px-4 py-3 text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800 rounded-xl transition-all">{darkMode ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />} {darkMode ? 'Light Mode' : 'Dark Mode'}</button>
+        </div>
+      </aside>
+
+      {/* MAIN CONTENT */}
+      <main className={`lg:ml-64 min-h-screen flex flex-col relative pb-20 transition-all duration-300 ${isSimMode ? 'bg-indigo-50/50' : 'bg-slate-50 dark:bg-slate-950'}`}>
+        <header className={`h-20 bg-white/80 dark:bg-slate-900/80 backdrop-blur-md sticky top-0 z-10 border-b border-slate-200 dark:border-slate-800 px-6 lg:px-8 flex items-center justify-between ${isSimMode ? 'top-6' : ''}`}>
+          <div className="flex items-center gap-4"><button onClick={() => setSidebarOpen(!sidebarOpen)} className="lg:hidden p-2 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg"><Menu className="w-6 h-6" /></button></div>
+          <div className="flex items-center gap-3">
+             <button onClick={toggleSimMode} className={`p-2 rounded-lg transition-all ${isSimMode ? 'bg-indigo-100 text-indigo-600 ring-2 ring-indigo-500' : 'hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500'}`} title={isSimMode ? "Exit Simulation" : "Enter Simulator Mode"}>
+                <FlaskConical className="w-5 h-5" />
+             </button>
+
+             <button onClick={() => setShowFundMover(true)} className="p-2 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg text-indigo-500" title="Move Funds"><ArrowLeftRight className="w-5 h-5" /></button>
+             <button onClick={() => setShowQuickLog(true)} className="p-2 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg text-amber-500" title="Speed Log"><Zap className="w-5 h-5 fill-amber-500" /></button>
+             <button onClick={() => setHistoryView({ isOpen: true, filterId: 'global' })} className="p-2 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg text-slate-500" title="Recent History"><History className="w-5 h-5" /></button>
+             <div className="text-xs font-bold text-slate-400 uppercase tracking-widest hidden md:block border-l pl-3 ml-1 border-slate-200">Real-Time Financial OS</div>
+          </div>
+        </header>
+        <div className="p-6 lg:p-8 flex-1 overflow-x-hidden">
+          {permissionError && <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4"><strong className="font-bold">Database Permission Error! </strong> Check Firestore Rules.</div>}
+          
+          {/* ACTION CENTER (Morning Briefing) */}
+          {activeTab === 'dashboard' && <ActionCenter expenses={expenses} incomes={incomes} onMarkPaid={updateExpense} onOpenWizard={() => setShowPayday(true)} userLevel={gameStats.level} />}
+
+          {/* PAYDAY BANNER (If Active) */}
+          <PaydayBanner incomes={derivedIncomes} onPayday={() => setShowPayday(true)} />
+          
+          {/* TAB: DASHBOARD */}
+          {activeTab === 'dashboard' && (
+            <div className="space-y-8 animate-in fade-in duration-500 w-full">
+              {/* GAME STATS WIDGET */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <GameStats stats={gameStats} />
+                  <TrophyCase badges={gameStats.badges} />
+              </div>
+
+              <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
+                <div><h1 className="text-3xl font-bold text-slate-900 dark:text-white">Financial Overview</h1><p className="text-slate-500 dark:text-slate-400 mt-1">Real-time budget tracking.</p></div>
+                <div className="flex gap-2">
+                  <button onClick={() => setShowAudit(true)} className="flex items-center gap-2 bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-white px-6 py-3 rounded-xl font-bold hover:opacity-90 transition-opacity"><CheckCircle2 className="w-4 h-4" /> Daily Audit</button>
+                  <button onClick={() => setShowPayday(true)} className="flex items-center gap-2 bg-slate-900 dark:bg-white dark:text-slate-900 text-white px-6 py-3 rounded-xl font-bold hover:opacity-90 transition-opacity"><Sparkles className="w-4 h-4" /> Payday</button>
+                </div>
+              </div>
+
+              {/* STATS GRID */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <StatCard title="Safe to Spend" value={Money.format(safeToSpend)} isPositive={true} icon={ShieldCheck} highlight={true} subtitle="Net Liquid Cash (Checking)" />
+                <StatCard title="Total Debt" value={Money.format(totalDebt)} isPositive={false} icon={TrendingDown} />
+              </div>
+
+              {/* ACCOUNTS GRID */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                {sortedAccounts.filter(a => !a.isHidden).map(acc => {
+                  const strat = transferStrategy[acc.id] || { requiredBalance: 0, pendingBalance: 0, heldForCredit: 0, reservedItems: [] };
+                  const isCredit = acc.type === 'credit';
+                  const required = isCredit ? 0 : strat.requiredBalance + strat.heldForCredit;
+                  const pending = isCredit ? 0 : strat.pendingBalance;
+                  const free = (acc.currentBalance || 0) - required - pending;
+                  const isFullyAllocated = Math.abs(free) < 50 && !isCredit && (acc.currentBalance || 0) > 0;
+                  const totalUsed = required + pending + Math.max(0, free);
+                  
+                  return (
+                    <div key={acc.id} onClick={() => { if(acc.type === 'credit') setPayCardAccount(acc); else setBreakdownModal({ accountId: acc.id, name: acc.name }); }} className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm cursor-pointer hover:border-emerald-500 transition-colors relative overflow-hidden">
+                      {isFullyAllocated && <div className="absolute top-0 right-0 bg-emerald-100 text-emerald-600 px-3 py-1 rounded-bl-xl text-[10px] font-bold uppercase tracking-wider flex items-center gap-1 shadow-sm"><Medal size={12}/> Zero-Based Hero</div>}
+                      <div className="flex justify-between items-center mb-4 mt-2">
+                        <div className="flex items-center gap-3">
+                          <div className={`p-3 rounded-xl ${isCredit ? 'bg-indigo-100 text-indigo-600' : 'bg-emerald-100 text-emerald-600'}`}>{isCredit ? <CardIcon size={24}/> : <Building2 size={24}/>}</div>
+                          <div><h3 className="font-bold text-lg text-slate-800 dark:text-white">{acc.name}</h3><p className="text-xs text-slate-500 uppercase">{acc.type}</p></div>
+                        </div>
+                        <div className="text-right">
+                          <div className={`font-bold text-xl ${(acc.currentBalance || 0) < 0 ? 'text-orange-500' : 'text-slate-800 dark:text-white'}`}>{Money.format(acc.currentBalance)}</div>
+                          {isCredit && <div className="text-xs text-indigo-500 font-bold mt-1">Tap to Pay</div>}
+                        </div>
+                      </div>
+                      {!isCredit && (
+                        <div className="space-y-2">
+                          <div className="flex h-2 w-full rounded-full overflow-hidden bg-slate-100 dark:bg-slate-700">
+                             {/* BLUE = PENDING */}
+                            <div className="bg-blue-400 h-full" style={{ width: `${(pending / totalUsed) * 100}%` }}></div>
+                             {/* AMBER = RESERVED */}
+                            <div className="bg-amber-400 h-full" style={{ width: `${(required / totalUsed) * 100}%` }}></div>
+                             {/* EMERALD = FREE */}
+                            <div className="bg-emerald-400 h-full" style={{ width: `${(Math.max(0, free) / totalUsed) * 100}%` }}></div>
+                          </div>
+                          <div className="flex justify-between text-sm font-medium">
+                            <div className="flex items-center gap-1 text-amber-500 cursor-pointer hover:text-amber-600" onClick={(e) => { e.stopPropagation(); setBreakdownModal({ accountId: acc.id, name: acc.name }); }}>
+                                Reserved: {Money.format(required + pending)} 
+                                {pending > 0 && <span className="text-[10px] text-blue-500 ml-1">({Money.format(pending)} pending)</span>}
+                                <Info size={14}/>
+                            </div>
+                            <span className={free < 0 ? "text-red-500 font-bold" : "text-emerald-500"}>{free < 0 ? 'Overallocated: ' : 'Free: '}{Money.format(free)}</span>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+          
+          {/* ... Rest of tabs ... */}
+          {activeTab === 'insights' && (
+             <div className="animate-in fade-in duration-500 w-full space-y-6">
+                <div className="flex justify-between items-center">
+                    <h1 className="text-3xl font-bold text-slate-900 dark:text-white">Cash Flow Insights</h1>
+                </div>
+                
+                {/* ROW 1: Net Worth & Forecast */}
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 h-64">
+                   <div className="bg-white dark:bg-slate-900 p-5 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm flex flex-col min-w-0 relative group overflow-hidden">
+                      <div className="flex justify-between items-start mb-2">
+                        <div><h3 className="font-bold text-sm text-slate-800 dark:text-white">Net Worth Trend</h3><p className="text-[10px] text-slate-500">History (Daily Audits)</p></div>
+                        <div className="p-1.5 bg-emerald-50 text-emerald-600 rounded-lg"><Activity size={16}/></div>
+                      </div>
+                      <div className="flex-1 min-h-0 -ml-2"><LiquidityTrendChart snapshots={snapshots} /></div>
+                   </div>
+
+                   <div onClick={() => setActiveTab('budget')} className="bg-white dark:bg-slate-900 p-5 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm flex flex-col min-w-0 relative cursor-pointer hover:border-blue-400 transition-colors group overflow-hidden">
+                      <div className="flex justify-between items-start mb-2">
+                        <div><h3 className="font-bold text-sm text-slate-800 dark:text-white group-hover:text-blue-600 transition-colors">30-Day Cash Flow</h3><p className="text-[10px] text-slate-500">Projected Balance</p></div>
+                        <div className="flex items-center gap-2">
+                           <span className="text-[10px] font-bold text-blue-500 bg-blue-50 px-2 py-0.5 rounded-full opacity-0 group-hover:opacity-100 transition-opacity">View Calendar</span>
+                           <div className="p-1.5 bg-blue-50 text-blue-600 rounded-lg"><TrendingUp size={16}/></div>
+                        </div>
+                      </div>
+                      <div className="flex-1 min-h-0 -ml-2"><CashFlowForecast accounts={accounts} incomes={derivedIncomes} expenses={expenses} /></div>
+                   </div>
+                </div>
+
+                {/* ROW 2: The River */}
+                <FlowVisualizer incomes={derivedIncomes} expenses={expenses} />
+             </div>
+          )}
+
+          {activeTab === 'fire' && <FireDashboard expenses={expenses} incomes={derivedIncomes} accounts={accounts} />}
+
+          {activeTab === 'budget' && (
+            <div className="w-full space-y-8 animate-in slide-in-from-right-4">
+              <div className="flex justify-between items-center bg-white dark:bg-slate-900 p-4 rounded-xl border border-slate-200 dark:border-slate-800">
+                <div className="flex gap-2">
+                  <button onClick={() => setSortType('date')} className={`px-4 py-1 rounded-full text-xs font-bold border ${sortType === 'date' ? 'bg-slate-800 text-white' : 'bg-white text-slate-600'}`}>Sort Date</button>
+                  <button onClick={() => setSortType('amount')} className={`px-4 py-1 rounded-full text-xs font-bold border ${sortType === 'amount' ? 'bg-slate-800 text-white' : 'bg-white text-slate-600'}`}>Sort Amount</button>
+                  <button onClick={() => setSortType('frequency')} className={`px-4 py-1 rounded-full text-xs font-bold border ${sortType === 'frequency' ? 'bg-slate-800 text-white' : 'bg-white text-slate-600'}`}>Sort Freq</button>
+                </div>
+                {subBleed > 0 && <div className="text-xs font-bold text-orange-600 flex items-center gap-1"><RefreshCw size={12}/> Subscription Bleed: {Money.format(subBleed)}/mo</div>}
+              </div>
+
+              <div className="mb-8"><BillCalendar expenses={expenses} incomes={derivedIncomes} transactions={transactions} /></div>
+              
+              <div>
+                <div className="flex justify-between items-center mb-4"><h2 className="text-xl font-bold text-slate-800 dark:text-white">Income Sources</h2></div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {derivedIncomes.map(i => (
+                    <ItemCard key={i.id} title={i.name} amount={Money.format(i.amount)} subtitle={i.frequency} icon={TrendingUp} colorClass="bg-emerald-100 text-emerald-600" isExpanded={expandedId === i.id} onClick={() => setExpandedId(expandedId === i.id ? null : i.id)} date={i.nextDate}>
+                      <div className="bg-slate-50 dark:bg-slate-800/50 p-3 border-t border-slate-100 dark:border-slate-700 flex gap-2">
+                        <button onClick={(e) => { e.stopPropagation(); setShowPayday(true); }} className="flex-1 py-2 bg-emerald-100 dark:bg-emerald-900/30 text-emerald-600 rounded-lg text-xs font-bold">Deposit Now</button>
+                        <button onClick={(e) => { e.stopPropagation(); if (i.isDerived) { setBreakdownIncome(i); } else { setEditingItem(i); setModalType('new'); setModalContext('income'); } }} className="flex-1 py-2 bg-slate-200 dark:bg-slate-700 rounded-lg text-xs font-bold dark:text-white">{i.isDerived ? 'View Breakdown' : 'Edit'}</button>
+                        <button onClick={(e) => { e.stopPropagation(); handleDelete(i.id, 'income'); }} className="flex-1 py-2 bg-red-100 dark:bg-red-900/30 text-red-600 rounded-lg text-xs font-bold">Delete</button>
+                      </div>
+                    </ItemCard>
+                  ))}
+                </div>
+              </div>
+
+              {['bill', 'variable', 'savings', 'debt'].map(type => {
+                const items = sortedExpenses.filter(e => e.type === type);
+                if (items.length === 0) return null;
+                return (
+                  <div key={type}>
+                    <div className="flex justify-between items-center mb-4 capitalize"><h2 className="text-xl font-bold text-slate-800 dark:text-white">{type === 'debt' ? 'Debt Payments' : (type === 'savings' ? 'Savings' : type + 's')}</h2>
+                    {type === 'debt' && <button onClick={() => setShowDebtSim(true)} className="flex items-center gap-1 text-xs font-bold bg-orange-100 text-orange-600 px-3 py-1.5 rounded-lg hover:bg-orange-200"><Zap size={12}/> Simulate Payoff</button>}
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {items.map(item => {
+                        let icon = CreditCard; let color = "bg-orange-100 text-orange-600"; let subtitle = item.frequency;
+                        let badges = [];
+                        if (item.isEssential) badges.push({label: 'Essential', color: 'bg-indigo-100 text-indigo-600'});
+                        if (item.isSubscription) badges.push({label: 'Sub', color: 'bg-orange-100 text-orange-600'});
+                        let progress = 0;
+                        if(type === 'variable') { icon = Wallet; color = "bg-blue-100 text-blue-600"; subtitle = `Left: ${Money.format(item.currentBalance || 0)}`; if ((item.amount||1) > 0) progress = ((item.currentBalance||0) / (item.amount||1)) * 100; }
+                        if(type === 'savings') { icon = PiggyBank; color = "bg-emerald-100 text-emerald-600"; subtitle = `Saved: ${Money.format(item.currentBalance)}`; }
+                        
+                        if(type === 'debt') { 
+                            icon = TrendingDown; 
+                            color = "bg-orange-100 text-orange-600"; 
+                            const linkedAcc = accounts.find(a => a.id === item.totalDebtBalance);
+                            subtitle = linkedAcc ? `Bal: ${Money.format(Math.abs(linkedAcc.currentBalance))}` : `Target: ${Money.format(item.totalDebtBalance || 0)}`;
+                        }
+
+                        const linkedAccountForDebt = type === 'debt' ? accounts.find(a => a.id === item.totalDebtBalance) : null;
+                        const isCreditDebt = linkedAccountForDebt?.type === 'credit';
+
+                        return (
+                          <ItemCard 
+                            key={item.id} 
+                            title={item.name} 
+                            amount={type === 'debt' && item.amount === 0 ? Money.format(item.currentBalance || 0) : Money.format(item.amount || 0)}
+                            subtitle={subtitle} 
+                            frequency={item.frequency} 
+                            icon={icon} 
+                            colorClass={color} 
+                            isExpanded={expandedId === item.id} 
+                            onClick={() => setExpandedId(expandedId === item.id ? null : item.id)} 
+                            isPaid={item.isPaid} 
+                            badges={badges} 
+                            progress={type==='variable' ? progress : undefined} 
+                            date={item.date || item.dueDate}
+                            type={type} 
+                            currentBalance={item.currentBalance}
+                            savingsType={item.savingsType} 
+                            targetAmount={item.targetBalance}
+                            pendingPayment={item.pendingPayment} 
+                          >
+                            <div className="bg-slate-50 dark:bg-slate-800/50 p-4 border-t border-slate-100 dark:border-slate-700 grid grid-cols-2 gap-2">
+                              {/* FIX: Only show Pay Card button if linked account is Credit */}
+                              {type === 'debt' && isCreditDebt && (
+                                <button onClick={(e) => { e.stopPropagation(); setPayingDebtItem(item); }} className="col-span-2 py-3 bg-emerald-500 text-white rounded-lg font-bold flex items-center justify-center gap-2 hover:bg-emerald-600 shadow-md shadow-emerald-200 dark:shadow-none mb-2"><Check size={18}/> Pay Card Now</button>
+                              )}
+
+                              {type === 'variable' && (
+                                <>
+                                  <div className="col-span-2 flex gap-2 mb-2"><input type="number" id={`add-${item.id}`} placeholder="+Add Funds" className="w-full p-2 rounded-lg border dark:border-slate-600 dark:bg-slate-700 dark:text-white" onClick={e => e.stopPropagation()}/><button onClick={(e) => { e.stopPropagation(); const val = document.getElementById(`add-${item.id}`).value; if(val) updateExpense(item.id, 'addedFunds', Money.toCents(val)); }} className="px-4 bg-emerald-500 text-white rounded-lg font-bold">Add</button></div>
+                                  <div className="col-span-2 flex gap-2 mb-2"><input type="number" id={`spd-${item.id}`} placeholder="-Log Spend" className="w-full p-2 rounded-lg border dark:border-slate-600 dark:bg-slate-600 dark:text-white" onClick={e => e.stopPropagation()}/><button onClick={(e) => { e.stopPropagation(); const val = document.getElementById(`spd-${item.id}`).value; if(val) updateExpense(item.id, 'spent', Money.toCents(val)); }} className="px-4 bg-red-500 text-white rounded-lg font-bold">Log</button></div>
+                                  <button onClick={(e) => { e.stopPropagation(); setShowCycleEnd(item); }} className="col-span-2 py-2 bg-indigo-100 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 rounded-lg text-xs font-bold mb-2 flex items-center justify-center gap-2"><RotateCcw size={12}/> Close Cycle / Rollover</button>
+                                </>
+                              )}
+                              {type === 'bill' && (<button onClick={(e) => { e.stopPropagation(); updateExpense(item.id, 'isPaid', !item.isPaid); }} className={`col-span-2 py-2 rounded-lg text-xs font-bold mb-2 ${item.isPaid ? 'bg-slate-200 text-slate-600' : 'bg-emerald-500 text-white'}`}>{item.isPaid ? 'Mark Unpaid' : 'Mark Paid'}</button>)}
+                              <button onClick={(e) => { e.stopPropagation(); setEditingItem(item); setModalType('new'); setModalContext('expense'); }} className="py-2 bg-slate-200 dark:bg-slate-700 rounded-lg text-xs font-bold dark:text-white">Edit</button>
+                              <button onClick={(e) => { e.stopPropagation(); setHistoryView({ isOpen: true, filterId: item.id, itemName: item.name }); }} className="py-2 bg-slate-200 dark:bg-slate-700 rounded-lg text-xs font-bold dark:text-white">History</button>
+                              <button onClick={(e) => { e.stopPropagation(); handleDelete(item.id, 'expense'); }} className="col-span-2 py-2 bg-red-100 dark:bg-red-900/30 text-red-600 rounded-lg text-xs font-bold">Delete</button>
+                            </div>
+                          </ItemCard>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {activeTab === 'accounts' && (
+            <div className="w-full space-y-8 animate-in slide-in-from-right-4">
+              <div className="flex justify-between items-center"><h2 className="text-2xl font-bold text-slate-800 dark:text-white">Accounts</h2><button onClick={() => { setModalType('account'); setModalContext('account'); }} className="text-sm font-bold text-emerald-600 hover:text-emerald-700">+ Add Account</button></div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                {['checking','credit','savings','loan','investment'].map(groupType => {
+                  const groupAccounts = sortedAccounts.filter(a => (a.type||'').toLowerCase() === groupType);
+                  if (groupAccounts.length === 0) return null;
+                  return (
+                    <div key={groupType} className="col-span-full space-y-4">
+                      <h3 className="text-sm font-bold text-slate-400 uppercase tracking-widest border-b border-slate-200 dark:border-slate-800 pb-2">{groupType}</h3>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        {groupAccounts.map(acc => (
+                          <div key={acc.id} onClick={() => { if(acc.type === 'credit') setPayCardAccount(acc); else setBreakdownModal({ accountId: acc.id, name: acc.name }); }} className={`bg-white dark:bg-slate-900 p-6 rounded-2xl border dark:border-slate-800 shadow-sm cursor-pointer hover:border-emerald-500 transition-colors ${acc.isHidden ? 'opacity-50 border-slate-200 border-dashed' : 'border-slate-200'}`}>
+                            <div className="flex justify-between items-center">
+                              <div className="flex items-center gap-4">
+                                <div className="p-3 bg-slate-100 dark:bg-slate-800 rounded-xl"><Building2 size={24} className="text-slate-600 dark:text-slate-400"/></div>
+                                <div><h3 className="font-bold text-lg text-slate-800 dark:text-white flex items-center gap-2">{acc.name}{acc.isHidden && <span className="text-[10px] bg-slate-100 px-2 rounded text-slate-500">HIDDEN</span>}</h3></div>
+                              </div>
+                              <div className="flex items-center gap-4">
+                                <div className="text-right"><div className="font-bold text-xl text-slate-800 dark:text-white">{Money.format(acc.currentBalance)}</div></div>
+                                <button onClick={(e) => { e.stopPropagation(); confirmAction('Delete Account', 'This cannot be undone.', 'Delete', () => handleDelete(acc.id, 'account')); }} className="p-2 hover:bg-red-50 rounded-full text-red-400 hover:text-red-600"><Trash2 size={18}/></button>
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'settings' && (
+            <div className="w-full space-y-6 animate-in slide-in-from-right-4">
+              <h2 className="text-2xl font-bold text-slate-800 dark:text-white">Data Management</h2>
+              
+              <PartnerManager onAdd={handleAddItem} onDelete={handleDelete} partners={partners} accounts={accounts} />
+              
+              {/* NEW BACKUP MANAGER */}
+              <BackupManager /> 
+
+              <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-4">
+                <button onClick={() => { if(confirm("Reset everything?")) { localStorage.clear(); window.location.reload(); }}} className="w-full py-4 bg-red-50 dark:bg-red-900/20 text-red-600 font-bold rounded-xl flex items-center justify-center gap-2 hover:bg-red-100 dark:hover:bg-red-900/30"><Trash2 size={20}/> Reset All Data</button>
+              </div>
+            </div>
+          )}
+        </div>
+      </main>
+
+      {/* FLOATING ACTION BUTTON & MODALS */}
+      <SpeedDial onAdd={(type) => { setModalType(type); setModalContext(type); }} />
+      <UnifiedEntryModal isOpen={!!modalType} onClose={() => { setModalType(null); setEditingItem(null); setModalContext(null); }} onSave={handleAddItem} accounts={accounts} initialData={editingItem} incomes={incomes} type={modalType} context={modalContext} partners={partners} />
+      {/* UPDATE: PaydayWizard now receives the completion handler */}
+      <PaydayWizard 
+          isOpen={showPayday} 
+          onClose={handlePaydayComplete} 
+          income={incomes.find(i => i.isPrimary) || incomes[0]} 
+          expenses={expenses} 
+          updateExpense={updateExpense} 
+          accounts={accounts} 
+          updateAccount={updateAccount} // Passed to allow audit step to save
+          incomes={derivedIncomes} // PASS DERIVED INCOMES HERE
+      />
+      <CycleEndModal isOpen={!!showCycleEnd} onClose={() => setShowCycleEnd(null)} expense={showCycleEnd} savingsGoals={expenses.filter(e => e.type === 'savings')} debts={expenses.filter(e => e.type === 'debt')} updateExpense={updateExpense} />
+      <DailyAuditModal 
+        isOpen={showAudit} 
+        onClose={handleAuditComplete} 
+        accounts={accounts} 
+        updateAccount={updateAccount} 
+        expenses={expenses} 
+        onClear={handleClearTransaction} 
+        onMarkPaid={updateExpense} 
+        updateExpense={updateExpense} 
+        onPayDebt={(item) => setPayingDebtItem(item)} // PASSED PROP
+      />
+      <SafeToSpendInfoModal isOpen={showSafeInfo} onClose={() => setShowSafeInfo(false)} safeAmount={safeToSpend} accountName={accounts.find(a => a.isDiscretionary)?.name} />
+      <CreditPaymentModal isOpen={!!payCardAccount} onClose={() => setPayCardAccount(null)} account={payCardAccount} onPay={handleAtomicPayment} accounts={accounts} />
+      
+      {/* UPDATE: Reserved Breakdown now gets handlers to modify state */}
+      <ReservedBreakdownModal 
+          isOpen={!!breakdownModal} 
+          onClose={() => setBreakdownModal(null)} 
+          items={breakdownModal ? (transferStrategy[breakdownModal.accountId]?.reservedItems || []) : []} 
+          accountName={breakdownModal?.name} 
+          onMarkPaid={updateExpense} 
+          onClear={handleClearTransaction}
+          updateExpense={updateExpense} 
+      />
+      
+      <PartnerIncomeBreakdownModal isOpen={!!breakdownIncome} onClose={() => setBreakdownIncome(null)} partnerName={breakdownIncome?.name} items={breakdownIncome?.breakdownItems || []} totalAnnual={breakdownIncome?.totalAnnual} payFrequency={breakdownIncome?.frequency} perPaycheck={breakdownIncome?.amount} />
+      
+      {/* HISTORY & QUICK LOG & DEBT SIM & FUND MOVER & PAY DEBT */}
+      <TransactionHistoryModal 
+        isOpen={historyView.isOpen} 
+        onClose={() => setHistoryView({ isOpen: false, filterId: null, itemName: null })} 
+        transactions={transactions} 
+        filterId={historyView.filterId} 
+        itemName={historyView.itemName} 
+      />
+      <QuickLogModal 
+        isOpen={showQuickLog} 
+        onClose={() => setShowQuickLog(false)} 
+        expenses={expenses}
+        onLogSpend={(id, amt) => updateExpense(id, 'spent', amt)}
+      />
+      <DebtSimulatorModal 
+        isOpen={showDebtSim} 
+        onClose={() => setShowDebtSim(false)} 
+        accounts={accounts} 
+        expenses={expenses} 
+      />
+      <FundMoverModal 
+        isOpen={showFundMover} 
+        onClose={() => setShowFundMover(false)} 
+        expenses={expenses} 
+        accounts={accounts}
+        onTransfer={handleFundTransfer}
+      />
+      
+      {/* NEW PAY DEBT MODAL */}
+      <PayDebtModal 
+        isOpen={!!payingDebtItem}
+        onClose={() => setPayingDebtItem(null)}
+        bucket={payingDebtItem}
+        account={accounts.find(a => a.id === payingDebtItem?.totalDebtBalance)}
+        onConfirm={handleConfirmPayCard}
+      />
+
+      {/* GLOBAL TOAST & CONFIRM */}
+      <ToastContainer toasts={toasts} removeToast={(id) => setToasts(prev => prev.filter(t => t.id !== id))} />
+      <ConfirmationModal 
+         isOpen={confirmState.isOpen} 
+         onClose={() => setConfirmState({ ...confirmState, isOpen: false })} 
+         onConfirm={confirmState.onConfirm} 
+         title={confirmState.title} 
+         message={confirmState.message} 
+         actionLabel={confirmState.actionLabel} 
+      />
+    </div>
+  );
+}
