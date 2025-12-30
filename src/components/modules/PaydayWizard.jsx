@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Check, DollarSign, ArrowRight, X, Sparkles, Building2, CheckCircle2, ArrowRightLeft, Bot, AlertTriangle, MinusCircle, ChevronDown, ChevronUp, PlusCircle, ArrowDownRight } from 'lucide-react';
-import { Money, countPaydaysInWindow, getPreviousDateStr, getTodayStr } from '../../lib/finance';
+// IMPORT ADDED: calculateDynamicAllocation
+import { Money, countPaydaysInWindow, getPreviousDateStr, getTodayStr, calculateDynamicAllocation } from '../../lib/finance';
 import { MoneyInput } from '../ui/Forms'; 
 
 const PaydayWizard = ({ isOpen, onClose, income, expenses, updateExpense, accounts, updateAccount, incomes }) => {
@@ -30,12 +31,28 @@ const PaydayWizard = ({ isOpen, onClose, income, expenses, updateExpense, accoun
         if (e.splitConfig?.isOwedOnly) return;
         if (e.type === 'bill' && e.isPaid) return; 
 
+        // --- NEW LOGIC START ---
+        // 1. Variable & Revolving Savings: Always allocate the scheduled contribution
+        // (Revolving = Savings with 0 or null target)
+        const isRevolvingSavings = e.type === 'savings' && (!e.targetBalance || e.targetBalance === 0);
+        const isVariable = e.type === 'variable';
+        
+        // User Request: "Savings goals should work... taking contribution amount and frequency..."
+        // We now prioritize Dynamic Allocation (Input Amount scaled to Pay Cycle) for ALL savings/variables.
+        // This stops "Gap Filling" from demanding huge amounts if behind schedule.
+        if (isVariable || e.type === 'savings') {
+             const dynamicAmount = calculateDynamicAllocation(e, income);
+             newAllocations[e.id] = dynamicAmount;
+             newSuggestions[e.id] = { share: dynamicAmount, gap: 0 }; // Gap irrelevant for contribution-based
+             return;
+        }
+
+        // 2. Fixed Bills (Gap Filling Logic remains for Bills as they are absolute obligations)
         let target = e.amount;
-        if (e.type === 'savings' && e.targetBalance > 0) target = e.targetBalance;
         const current = e.currentBalance || 0;
         const gap = Math.max(0, target - current);
 
-        if (gap === 0 && e.type !== 'variable') return; 
+        if (gap === 0) return; 
 
         let share = 0;
         const dueDate = e.date || e.dueDate || e.nextDate;
@@ -51,6 +68,7 @@ const PaydayWizard = ({ isOpen, onClose, income, expenses, updateExpense, accoun
         share = Math.min(share, income.amount); 
         newAllocations[e.id] = share;
         newSuggestions[e.id] = { share, gap }; 
+        // --- NEW LOGIC END ---
       });
       setAllocations(newAllocations);
       setSuggestions(newSuggestions);

@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { 
   LayoutDashboard, Wallet, Building2, Settings, LogOut, Sun, Moon, Menu, RefreshCw, 
   CheckCircle2, Sparkles, ShieldCheck, TrendingDown, Medal, CreditCard as CardIcon, 
-  Info, TrendingUp, PiggyBank, RotateCcw, Flame, CreditCard, Trash2, Activity, History, Zap, ArrowLeftRight, Check, FlaskConical, XCircle, PieChart 
+  Info, TrendingUp, PiggyBank, RotateCcw, Flame, CreditCard, Trash2, Activity, History, Zap, ArrowLeftRight, Check, FlaskConical, XCircle, PieChart, CalendarDays
 } from 'lucide-react';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
 import { 
@@ -68,6 +68,7 @@ export default function App() {
   const [expandedId, setExpandedId] = useState(null);
   const [payCardAccount, setPayCardAccount] = useState(null);
   const [sortType, setSortType] = useState('date');
+  const [budgetView, setBudgetView] = useState('upcoming'); // 'upcoming' | 'history'
   const [toasts, setToasts] = useState([]);
   const [confirmState, setConfirmState] = useState({ isOpen: false });
   const [showConfetti, setShowConfetti] = useState(false); 
@@ -706,21 +707,27 @@ export default function App() {
             }
           }
 
-          else if (field === 'isPaid' && value === true) {
-             const amountToPay = exp.amount || 0;
-             // NOTE: We do NOT deduct from Account yet. Pending Clearance logic applies.
-             // If paying FROM a credit card, move to debt bucket immediately (that doesn't wait)
-             if (isCreditAccount && debtDoc && debtDoc.exists()) {
-                 debtBucketBal += amountToPay;
-                 transaction.update(debtRef, { currentBalance: debtBucketBal });
+          else if (field === 'isPaid') {
+             // MARK PAID
+             if (value === true) {
+                const amountToPay = exp.amount || 0;
+                // NOTE: We do NOT deduct from Account yet. Pending Clearance logic applies.
+                // If paying FROM a credit card, move to debt bucket immediately (that doesn't wait)
+                if (isCreditAccount && debtDoc && debtDoc.exists()) {
+                    debtBucketBal += amountToPay;
+                    transaction.update(debtRef, { currentBalance: debtBucketBal });
+                }
+                // CRITICAL FIX: DO NOT ADVANCE DATE YET.
+                // Just mark paid and uncleared.
+                transaction.update(expRef, { isPaid: true, isCleared: false });
+                logAmount = -amountToPay;
+                logType = 'bill_paid';
+             } 
+             // MARK UNPAID (FIXED)
+             else {
+                 // Resetting to Unpaid should also clear the "Cleared" flag to be safe.
+                 transaction.update(expRef, { isPaid: false, isCleared: false });
              }
-
-             // CRITICAL FIX: DO NOT ADVANCE DATE YET.
-             // Just mark paid and uncleared.
-             transaction.update(expRef, { isPaid: true, isCleared: false });
-
-             logAmount = -amountToPay;
-             logType = 'bill_paid';
           }
 
           if (logType) {
@@ -740,8 +747,8 @@ export default function App() {
             awardXP(5);
         }
         else if (field === 'isPaid') {
-            addToast("Marked Paid (Pending Clearance)");
-            awardXP(10);
+            addToast(value ? "Marked Paid (Pending Clearance)" : "Marked Unpaid");
+            awardXP(value ? 10 : 0);
             if (navigator.vibrate) navigator.vibrate(200); 
         }
         else addToast("Updated Successfully");
@@ -884,6 +891,48 @@ export default function App() {
 
   const subBleed = useMemo(() => expenses.filter(e => e.isSubscription).reduce((sum, e) => sum + getAnnualAmount(e.amount, e.frequency)/12, 0), [expenses]);
 
+  // --- FORECAST FEED GENERATOR (Next 90 Days) ---
+  const forecastFeed = useMemo(() => {
+      if (!expenses.length) return [];
+      const items = [];
+      const now = new Date();
+      // FIX: Use new Date() explicitly to prevent String comparison issues in finance.js
+      const windowStart = new Date();
+      
+      expenses.forEach(e => {
+          if (['bill', 'subscription', 'loan'].includes(e.type)) {
+               const startDate = e.date || e.dueDate || e.nextDate;
+               if (!startDate) return;
+               
+               // FIX: Pass Date object, not string
+               const occs = getOccurrencesInWindow(startDate, e.frequency, windowStart, 90);
+               occs.forEach(dateStr => {
+                   // Calculate simplified status
+                   // If it's the current cycle date AND it's marked paid, show as 'Paid' but still show it?
+                   // User wants "Continuous list".
+                   
+                   const isCurrentCycle = dateStr === startDate;
+                   if (isCurrentCycle && e.isPaid) {
+                       // Optional: Include it as "Paid" if you want full continuity, 
+                       // but standard logic usually hides paid current items.
+                       // We will skip paid current items to avoid clutter, as requested "Upcoming".
+                       return; 
+                   }
+
+                   items.push({
+                       id: e.id,
+                       name: e.name,
+                       amount: e.amount,
+                       date: dateStr,
+                       original: e,
+                       status: isCurrentCycle ? 'Due Soon' : 'Upcoming'
+                   });
+               });
+          }
+      });
+      return items.sort((a,b) => new Date(a.date) - new Date(b.date));
+  }, [expenses]);
+
   if (authLoading) return <div className="min-h-screen bg-slate-900 flex items-center justify-center text-white"><RefreshCw className="animate-spin mr-2"/> Loading OneViewPro...</div>;
   if (!user) return <AuthScreen />;
 
@@ -909,9 +958,9 @@ export default function App() {
         <nav className="p-4 space-y-1">
           {[
             { id: 'dashboard', label: 'Overview', icon: LayoutDashboard }, 
+            { id: 'budget', label: 'Budget Plan', icon: Wallet }, // MOVED UP
             { id: 'insights', label: 'Insights', icon: PieChart }, 
             { id: 'fire', label: 'Independence', icon: Flame }, 
-            { id: 'budget', label: 'Budget Plan', icon: Wallet }, 
             { id: 'accounts', label: 'Accounts', icon: Building2 }, 
             { id: 'settings', label: 'Settings', icon: Settings }
           ].map((item) => (
@@ -983,11 +1032,11 @@ export default function App() {
                   const free = (acc.currentBalance || 0) - required - pending;
                   const isFullyAllocated = Math.abs(free) < 50 && !isCredit && !isTrackingAccount && (acc.currentBalance || 0) > 0;
                   const totalUsed = required + pending + Math.max(0, free);
-
+                  
                   let borderColor = 'border-slate-200 dark:border-slate-800';
                   if (acc.type === 'loan') borderColor = 'border-blue-200 dark:border-blue-900';
                   if (acc.type === 'investment') borderColor = 'border-purple-200 dark:border-purple-900';
-                  
+
                   return (
                     <div key={acc.id} onClick={() => { if(acc.type === 'credit') setPayCardAccount(acc); else if (!isTrackingAccount) setBreakdownModal({ accountId: acc.id, name: acc.name }); }} className={`bg-white dark:bg-slate-900 p-6 rounded-2xl border ${borderColor} shadow-sm cursor-pointer hover:border-emerald-500 transition-colors relative overflow-hidden`}>
                       {isFullyAllocated && <div className="absolute top-0 right-0 bg-emerald-100 text-emerald-600 px-3 py-1 rounded-bl-xl text-[10px] font-bold uppercase tracking-wider flex items-center gap-1 shadow-sm"><Medal size={12}/> Zero-Based Hero</div>}
@@ -1003,16 +1052,11 @@ export default function App() {
                           {isCredit && <div className="text-xs text-indigo-500 font-bold mt-1">Tap to Pay</div>}
                         </div>
                       </div>
-                      
-                      {/* HIDE RESERVED BAR FOR LOANS/INVESTMENTS */}
                       {!isCredit && !isTrackingAccount && (
                         <div className="space-y-2">
                           <div className="flex h-2 w-full rounded-full overflow-hidden bg-slate-100 dark:bg-slate-700">
-                             {/* BLUE = PENDING */}
                             <div className="bg-blue-400 h-full" style={{ width: `${(pending / totalUsed) * 100}%` }}></div>
-                             {/* AMBER = RESERVED */}
                             <div className="bg-amber-400 h-full" style={{ width: `${(required / totalUsed) * 100}%` }}></div>
-                             {/* EMERALD = FREE */}
                             <div className="bg-emerald-400 h-full" style={{ width: `${(Math.max(0, free) / totalUsed) * 100}%` }}></div>
                           </div>
                           <div className="flex justify-between text-sm font-medium">
@@ -1069,107 +1113,176 @@ export default function App() {
           {activeTab === 'fire' && <FireDashboard expenses={expenses} incomes={derivedIncomes} accounts={accounts} />}
 
           {activeTab === 'budget' && (
-            <div className="w-full space-y-8 animate-in slide-in-from-right-4">
+            <div className="w-full space-y-6 animate-in slide-in-from-right-4">
               <div className="flex justify-between items-center bg-white dark:bg-slate-900 p-4 rounded-xl border border-slate-200 dark:border-slate-800">
                 <div className="flex gap-2">
-                  <button onClick={() => setSortType('date')} className={`px-4 py-1 rounded-full text-xs font-bold border ${sortType === 'date' ? 'bg-slate-800 text-white' : 'bg-white text-slate-600'}`}>Sort Date</button>
-                  <button onClick={() => setSortType('amount')} className={`px-4 py-1 rounded-full text-xs font-bold border ${sortType === 'amount' ? 'bg-slate-800 text-white' : 'bg-white text-slate-600'}`}>Sort Amount</button>
-                  <button onClick={() => setSortType('frequency')} className={`px-4 py-1 rounded-full text-xs font-bold border ${sortType === 'frequency' ? 'bg-slate-800 text-white' : 'bg-white text-slate-600'}`}>Sort Freq</button>
+                  <button onClick={() => setBudgetView('upcoming')} className={`px-6 py-2 rounded-lg text-sm font-bold transition-all ${budgetView === 'upcoming' ? 'bg-slate-800 text-white shadow-lg' : 'text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800'}`}>Upcoming Plan</button>
+                  <button onClick={() => setBudgetView('history')} className={`px-6 py-2 rounded-lg text-sm font-bold transition-all ${budgetView === 'history' ? 'bg-slate-800 text-white shadow-lg' : 'text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800'}`}>History</button>
                 </div>
+                {budgetView === 'upcoming' && (
+                  <div className="flex gap-2">
+                    <button onClick={() => setSortType('date')} className={`px-4 py-1 rounded-full text-xs font-bold border ${sortType === 'date' ? 'bg-slate-800 text-white' : 'bg-white text-slate-600'}`}>Sort Date</button>
+                    <button onClick={() => setSortType('amount')} className={`px-4 py-1 rounded-full text-xs font-bold border ${sortType === 'amount' ? 'bg-slate-800 text-white' : 'bg-white text-slate-600'}`}>Sort Amount</button>
+                    <button onClick={() => setSortType('frequency')} className={`px-4 py-1 rounded-full text-xs font-bold border ${sortType === 'frequency' ? 'bg-slate-800 text-white' : 'bg-white text-slate-600'}`}>Sort Freq</button>
+                  </div>
+                )}
                 {subBleed > 0 && <div className="text-xs font-bold text-orange-600 flex items-center gap-1"><RefreshCw size={12}/> Subscription Bleed: {Money.format(subBleed)}/mo</div>}
               </div>
 
-              <div className="mb-8"><BillCalendar expenses={expenses} incomes={derivedIncomes} transactions={transactions} /></div>
-              
-              <div>
-                <div className="flex justify-between items-center mb-4"><h2 className="text-xl font-bold text-slate-800 dark:text-white">Income Sources</h2></div>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {derivedIncomes.map(i => (
-                    <ItemCard key={i.id} title={i.name} amount={Money.format(i.amount)} subtitle={i.frequency} icon={TrendingUp} colorClass="bg-emerald-100 text-emerald-600" isExpanded={expandedId === i.id} onClick={() => setExpandedId(expandedId === i.id ? null : i.id)} date={i.nextDate}>
-                      <div className="bg-slate-50 dark:bg-slate-800/50 p-3 border-t border-slate-100 dark:border-slate-700 flex gap-2">
-                        <button onClick={(e) => { e.stopPropagation(); setShowPayday(true); }} className="flex-1 py-2 bg-emerald-100 dark:bg-emerald-900/30 text-emerald-600 rounded-lg text-xs font-bold">Deposit Now</button>
-                        <button onClick={(e) => { e.stopPropagation(); if (i.isDerived) { setBreakdownIncome(i); } else { setEditingItem(i); setModalType('new'); setModalContext('income'); } }} className="flex-1 py-2 bg-slate-200 dark:bg-slate-700 rounded-lg text-xs font-bold dark:text-white">{i.isDerived ? 'View Breakdown' : 'Edit'}</button>
-                        <button onClick={(e) => { e.stopPropagation(); handleDelete(i.id, 'income'); }} className="flex-1 py-2 bg-red-100 dark:bg-red-900/30 text-red-600 rounded-lg text-xs font-bold">Delete</button>
-                      </div>
-                    </ItemCard>
-                  ))}
-                </div>
-              </div>
-
-              {['bill', 'variable', 'savings', 'debt'].map(type => {
-                const items = sortedExpenses.filter(e => e.type === type);
-                if (items.length === 0) return null;
-                return (
-                  <div key={type}>
-                    <div className="flex justify-between items-center mb-4 capitalize"><h2 className="text-xl font-bold text-slate-800 dark:text-white">{type === 'debt' ? 'Debt Payments' : (type === 'savings' ? 'Savings' : type + 's')}</h2>
-                    {type === 'debt' && <button onClick={() => setShowDebtSim(true)} className="flex items-center gap-1 text-xs font-bold bg-orange-100 text-orange-600 px-3 py-1.5 rounded-lg hover:bg-orange-200"><Zap size={12}/> Simulate Payoff</button>}
+              {budgetView === 'upcoming' && (
+                <div className="space-y-8">
+                  {/* FORECAST FEED */}
+                  <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 overflow-hidden">
+                    <div className="p-4 border-b border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/50 flex items-center gap-2">
+                      <CalendarDays size={18} className="text-slate-400"/>
+                      <h3 className="font-bold text-slate-700 dark:text-slate-300">Projected Expenses (90 Days)</h3>
                     </div>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      {items.map(item => {
-                        let icon = CreditCard; let color = "bg-orange-100 text-orange-600"; let subtitle = item.frequency;
-                        let badges = [];
-                        if (item.isEssential) badges.push({label: 'Essential', color: 'bg-indigo-100 text-indigo-600'});
-                        if (item.isSubscription) badges.push({label: 'Sub', color: 'bg-orange-100 text-orange-600'});
-                        let progress = 0;
-                        if(type === 'variable') { icon = Wallet; color = "bg-blue-100 text-blue-600"; subtitle = `Left: ${Money.format(item.currentBalance || 0)}`; if ((item.amount||1) > 0) progress = ((item.currentBalance||0) / (item.amount||1)) * 100; }
-                        if(type === 'savings') { icon = PiggyBank; color = "bg-emerald-100 text-emerald-600"; subtitle = `Saved: ${Money.format(item.currentBalance)}`; }
-                        
-                        if(type === 'debt') { 
-                            icon = TrendingDown; 
-                            color = "bg-orange-100 text-orange-600"; 
-                            const linkedAcc = accounts.find(a => a.id === item.totalDebtBalance);
-                            subtitle = linkedAcc ? `Bal: ${Money.format(Math.abs(linkedAcc.currentBalance))}` : `Target: ${Money.format(item.totalDebtBalance || 0)}`;
-                        }
-
-                        const linkedAccountForDebt = type === 'debt' ? accounts.find(a => a.id === item.totalDebtBalance) : null;
-                        const isCreditDebt = linkedAccountForDebt?.type === 'credit';
-
-                        return (
-                          <ItemCard 
-                            key={item.id} 
-                            title={item.name} 
-                            amount={type === 'debt' && item.amount === 0 ? Money.format(item.currentBalance || 0) : Money.format(item.amount || 0)}
-                            subtitle={subtitle} 
-                            frequency={item.frequency} 
-                            icon={icon} 
-                            colorClass={color} 
-                            isExpanded={expandedId === item.id} 
-                            onClick={() => setExpandedId(expandedId === item.id ? null : item.id)} 
-                            isPaid={item.isPaid} 
-                            badges={badges} 
-                            progress={type==='variable' ? progress : undefined} 
-                            date={item.date || item.dueDate}
-                            type={type} 
-                            currentBalance={item.currentBalance}
-                            savingsType={item.savingsType} 
-                            targetAmount={item.targetBalance}
-                            pendingPayment={item.pendingPayment} 
-                          >
-                            <div className="bg-slate-50 dark:bg-slate-800/50 p-4 border-t border-slate-100 dark:border-slate-700 grid grid-cols-2 gap-2">
-                              {/* FIX: Only show Pay Card button if linked account is Credit */}
-                              {type === 'debt' && isCreditDebt && (
-                                <button onClick={(e) => { e.stopPropagation(); setPayingDebtItem(item); }} className="col-span-2 py-3 bg-emerald-500 text-white rounded-lg font-bold flex items-center justify-center gap-2 hover:bg-emerald-600 shadow-md shadow-emerald-200 dark:shadow-none mb-2"><Check size={18}/> Pay Card Now</button>
-                              )}
-
-                              {type === 'variable' && (
-                                <>
-                                  <div className="col-span-2 flex gap-2 mb-2"><input type="number" id={`add-${item.id}`} placeholder="+Add Funds" className="w-full p-2 rounded-lg border dark:border-slate-600 dark:bg-slate-700 dark:text-white" onClick={e => e.stopPropagation()}/><button onClick={(e) => { e.stopPropagation(); const val = document.getElementById(`add-${item.id}`).value; if(val) updateExpense(item.id, 'addedFunds', Money.toCents(val)); }} className="px-4 bg-emerald-500 text-white rounded-lg font-bold">Add</button></div>
-                                  <div className="col-span-2 flex gap-2 mb-2"><input type="number" id={`spd-${item.id}`} placeholder="-Log Spend" className="w-full p-2 rounded-lg border dark:border-slate-600 dark:bg-slate-600 dark:text-white" onClick={e => e.stopPropagation()}/><button onClick={(e) => { e.stopPropagation(); const val = document.getElementById(`spd-${item.id}`).value; if(val) updateExpense(item.id, 'spent', Money.toCents(val)); }} className="px-4 bg-red-500 text-white rounded-lg font-bold">Log</button></div>
-                                  <button onClick={(e) => { e.stopPropagation(); setShowCycleEnd(item); }} className="col-span-2 py-2 bg-indigo-100 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 rounded-lg text-xs font-bold mb-2 flex items-center justify-center gap-2"><RotateCcw size={12}/> Close Cycle / Rollover</button>
-                                </>
-                              )}
-                              {type === 'bill' && (<button onClick={(e) => { e.stopPropagation(); updateExpense(item.id, 'isPaid', !item.isPaid); }} className={`col-span-2 py-2 rounded-lg text-xs font-bold mb-2 ${item.isPaid ? 'bg-slate-200 text-slate-600' : 'bg-emerald-500 text-white'}`}>{item.isPaid ? 'Mark Unpaid' : 'Mark Paid'}</button>)}
-                              <button onClick={(e) => { e.stopPropagation(); setEditingItem(item); setModalType('new'); setModalContext('expense'); }} className="py-2 bg-slate-200 dark:bg-slate-700 rounded-lg text-xs font-bold dark:text-white">Edit</button>
-                              <button onClick={(e) => { e.stopPropagation(); setHistoryView({ isOpen: true, filterId: item.id, itemName: item.name }); }} className="py-2 bg-slate-200 dark:bg-slate-700 rounded-lg text-xs font-bold dark:text-white">History</button>
-                              <button onClick={(e) => { e.stopPropagation(); handleDelete(item.id, 'expense'); }} className="col-span-2 py-2 bg-red-100 dark:bg-red-900/30 text-red-600 rounded-lg text-xs font-bold">Delete</button>
-                            </div>
-                          </ItemCard>
-                        );
-                      })}
+                    <div className="divide-y divide-slate-100 dark:divide-slate-800 max-h-[400px] overflow-y-auto custom-scrollbar">
+                       {forecastFeed.map((item, idx) => {
+                         const dateObj = new Date(item.date);
+                         const dayName = dateObj.toLocaleDateString('en-US', { weekday: 'short' });
+                         const monthDay = dateObj.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+                         
+                         return (
+                           <div key={`${item.id}-${item.date}-${idx}`} className="flex items-center justify-between p-4 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors">
+                              <div className="flex items-center gap-4">
+                                 <div className="text-center w-12">
+                                   <div className="text-[10px] font-bold text-slate-400 uppercase">{dayName}</div>
+                                   <div className="font-bold text-slate-800 dark:text-white">{monthDay}</div>
+                                 </div>
+                                 <div>
+                                   <div className="font-bold text-slate-800 dark:text-white">{item.name}</div>
+                                   <div className="text-xs text-slate-500">{item.status}</div>
+                                 </div>
+                              </div>
+                              <div className="font-bold text-slate-800 dark:text-white">{Money.format(item.amount)}</div>
+                           </div>
+                         );
+                       })}
+                       {forecastFeed.length === 0 && <div className="p-8 text-center text-slate-400">No upcoming expenses found.</div>}
                     </div>
                   </div>
-                );
-              })}
+                  
+                  {/* BILL CALENDAR (COLLAPSED BY DEFAULT OR BELOW) */}
+                  <div className="mb-8"><BillCalendar expenses={expenses} incomes={derivedIncomes} transactions={transactions} /></div>
+                  
+                  {/* MANAGEMENT CARDS */}
+                  <div>
+                    <div className="flex justify-between items-center mb-4"><h2 className="text-xl font-bold text-slate-800 dark:text-white">Manage Expenses</h2></div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {derivedIncomes.map(i => (
+                        <ItemCard key={i.id} title={i.name} amount={Money.format(i.amount)} subtitle={i.frequency} icon={TrendingUp} colorClass="bg-emerald-100 text-emerald-600" isExpanded={expandedId === i.id} onClick={() => setExpandedId(expandedId === i.id ? null : i.id)} date={i.nextDate}>
+                          <div className="bg-slate-50 dark:bg-slate-800/50 p-3 border-t border-slate-100 dark:border-slate-700 flex gap-2">
+                            <button onClick={(e) => { e.stopPropagation(); setShowPayday(true); }} className="flex-1 py-2 bg-emerald-100 dark:bg-emerald-900/30 text-emerald-600 rounded-lg text-xs font-bold">Deposit Now</button>
+                            <button onClick={(e) => { e.stopPropagation(); if (i.isDerived) { setBreakdownIncome(i); } else { setEditingItem(i); setModalType('new'); setModalContext('income'); } }} className="flex-1 py-2 bg-slate-200 dark:bg-slate-700 rounded-lg text-xs font-bold dark:text-white">{i.isDerived ? 'View Breakdown' : 'Edit'}</button>
+                            <button onClick={(e) => { e.stopPropagation(); handleDelete(i.id, 'income'); }} className="flex-1 py-2 bg-red-100 dark:bg-red-900/30 text-red-600 rounded-lg text-xs font-bold">Delete</button>
+                          </div>
+                        </ItemCard>
+                      ))}
+                    </div>
+                  </div>
+
+                  {['bill', 'variable', 'savings', 'debt'].map(type => {
+                    const items = sortedExpenses.filter(e => e.type === type);
+                    if (items.length === 0) return null;
+                    return (
+                      <div key={type}>
+                        <div className="flex justify-between items-center mb-4 capitalize"><h2 className="text-xl font-bold text-slate-800 dark:text-white">{type === 'debt' ? 'Debt Payments' : (type === 'savings' ? 'Savings' : type + 's')}</h2>
+                        {type === 'debt' && <button onClick={() => setShowDebtSim(true)} className="flex items-center gap-1 text-xs font-bold bg-orange-100 text-orange-600 px-3 py-1.5 rounded-lg hover:bg-orange-200"><Zap size={12}/> Simulate Payoff</button>}
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          {items.map(item => {
+                            let icon = CreditCard; let color = "bg-orange-100 text-orange-600"; let subtitle = item.frequency;
+                            let badges = [];
+                            if (item.isEssential) badges.push({label: 'Essential', color: 'bg-indigo-100 text-indigo-600'});
+                            if (item.isSubscription) badges.push({label: 'Sub', color: 'bg-orange-100 text-orange-600'});
+                            let progress = 0;
+                            if(type === 'variable') { icon = Wallet; color = "bg-blue-100 text-blue-600"; subtitle = `Left: ${Money.format(item.currentBalance || 0)}`; if ((item.amount||1) > 0) progress = ((item.currentBalance||0) / (item.amount||1)) * 100; }
+                            if(type === 'savings') { icon = PiggyBank; color = "bg-emerald-100 text-emerald-600"; subtitle = `Saved: ${Money.format(item.currentBalance)}`; }
+                            
+                            if(type === 'debt') { 
+                                icon = TrendingDown; 
+                                color = "bg-orange-100 text-orange-600"; 
+                                const linkedAcc = accounts.find(a => a.id === item.totalDebtBalance);
+                                subtitle = linkedAcc ? `Bal: ${Money.format(Math.abs(linkedAcc.currentBalance))}` : `Target: ${Money.format(item.totalDebtBalance || 0)}`;
+                            }
+
+                            const linkedAccountForDebt = type === 'debt' ? accounts.find(a => a.id === item.totalDebtBalance) : null;
+                            const isCreditDebt = linkedAccountForDebt?.type === 'credit';
+
+                            return (
+                              <ItemCard 
+                                key={item.id} 
+                                title={item.name} 
+                                amount={type === 'debt' && item.amount === 0 ? Money.format(item.currentBalance || 0) : Money.format(item.amount || 0)}
+                                subtitle={subtitle} 
+                                frequency={item.frequency} 
+                                icon={icon} 
+                                colorClass={color} 
+                                isExpanded={expandedId === item.id} 
+                                onClick={() => setExpandedId(expandedId === item.id ? null : item.id)} 
+                                isPaid={item.isPaid} 
+                                badges={badges} 
+                                progress={type==='variable' ? progress : undefined} 
+                                date={item.date || item.dueDate}
+                                type={type} 
+                                currentBalance={item.currentBalance}
+                                savingsType={item.savingsType} 
+                                targetAmount={item.targetBalance}
+                                pendingPayment={item.pendingPayment} 
+                              >
+                                <div className="bg-slate-50 dark:bg-slate-800/50 p-4 border-t border-slate-100 dark:border-slate-700 grid grid-cols-2 gap-2">
+                                  {/* FIX: Only show Pay Card button if linked account is Credit */}
+                                  {type === 'debt' && isCreditDebt && (
+                                    <button onClick={(e) => { e.stopPropagation(); setPayingDebtItem(item); }} className="col-span-2 py-3 bg-emerald-500 text-white rounded-lg font-bold flex items-center justify-center gap-2 hover:bg-emerald-600 shadow-md shadow-emerald-200 dark:shadow-none mb-2"><Check size={18}/> Pay Card Now</button>
+                                  )}
+
+                                  {type === 'variable' && (
+                                    <>
+                                      <div className="col-span-2 flex gap-2 mb-2"><input type="number" id={`add-${item.id}`} placeholder="+Add Funds" className="w-full p-2 rounded-lg border dark:border-slate-600 dark:bg-slate-700 dark:text-white" onClick={e => e.stopPropagation()}/><button onClick={(e) => { e.stopPropagation(); const val = document.getElementById(`add-${item.id}`).value; if(val) updateExpense(item.id, 'addedFunds', Money.toCents(val)); }} className="px-4 bg-emerald-500 text-white rounded-lg font-bold">Add</button></div>
+                                      <div className="col-span-2 flex gap-2 mb-2"><input type="number" id={`spd-${item.id}`} placeholder="-Log Spend" className="w-full p-2 rounded-lg border dark:border-slate-600 dark:bg-slate-600 dark:text-white" onClick={e => e.stopPropagation()}/><button onClick={(e) => { e.stopPropagation(); const val = document.getElementById(`spd-${item.id}`).value; if(val) updateExpense(item.id, 'spent', Money.toCents(val)); }} className="px-4 bg-red-500 text-white rounded-lg font-bold">Log</button></div>
+                                      <button onClick={(e) => { e.stopPropagation(); setShowCycleEnd(item); }} className="col-span-2 py-2 bg-indigo-100 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 rounded-lg text-xs font-bold mb-2 flex items-center justify-center gap-2"><RotateCcw size={12}/> Close Cycle / Rollover</button>
+                                    </>
+                                  )}
+                                  {type === 'bill' && (<button onClick={(e) => { e.stopPropagation(); updateExpense(item.id, 'isPaid', !item.isPaid); }} className={`col-span-2 py-2 rounded-lg text-xs font-bold mb-2 ${item.isPaid ? 'bg-slate-200 text-slate-600' : 'bg-emerald-500 text-white'}`}>{item.isPaid ? 'Mark Unpaid' : 'Mark Paid'}</button>)}
+                                  <button onClick={(e) => { e.stopPropagation(); setEditingItem(item); setModalType('new'); setModalContext('expense'); }} className="py-2 bg-slate-200 dark:bg-slate-700 rounded-lg text-xs font-bold dark:text-white">Edit</button>
+                                  <button onClick={(e) => { e.stopPropagation(); setHistoryView({ isOpen: true, filterId: item.id, itemName: item.name }); }} className="py-2 bg-slate-200 dark:bg-slate-700 rounded-lg text-xs font-bold dark:text-white">History</button>
+                                  <button onClick={(e) => { e.stopPropagation(); handleDelete(item.id, 'expense'); }} className="col-span-2 py-2 bg-red-100 dark:bg-red-900/30 text-red-600 rounded-lg text-xs font-bold">Delete</button>
+                                </div>
+                              </ItemCard>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* HISTORY VIEW */}
+              {budgetView === 'history' && (
+                 <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 overflow-hidden">
+                    <div className="p-4 border-b border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/50 flex items-center gap-2">
+                       <History size={18} className="text-slate-400"/>
+                       <h3 className="font-bold text-slate-700 dark:text-slate-300">Recently Paid Bills</h3>
+                    </div>
+                    <div className="divide-y divide-slate-100 dark:divide-slate-800">
+                       {transactions.filter(t => t.type === 'bill_paid').length === 0 && <div className="p-8 text-center text-slate-400">No recent payments found.</div>}
+                       {transactions.filter(t => t.type === 'bill_paid').map(t => (
+                          <div key={t.id} className="flex justify-between items-center p-4 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors">
+                             <div className="flex items-center gap-3">
+                                <div className="p-2 bg-emerald-100 text-emerald-600 rounded-full"><Check size={16}/></div>
+                                <div>
+                                   <div className="font-bold text-slate-800 dark:text-white">{t.itemName}</div>
+                                   <div className="text-xs text-slate-500">{new Date(t.createdAt?.seconds * 1000).toLocaleDateString()}</div>
+                                </div>
+                             </div>
+                             <div className="font-bold text-slate-800 dark:text-white">{Money.format(Math.abs(t.amount))}</div>
+                          </div>
+                       ))}
+                    </div>
+                 </div>
+              )}
             </div>
           )}
 
