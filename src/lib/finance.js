@@ -1,4 +1,6 @@
-// --- FORMATTING & MATH ---
+// src/lib/finance.js
+
+// ... [Keep existing FORMATTING & MATH section unchanged] ...
 export const Money = {
   format: (cents) => {
     if (cents === undefined || cents === null || isNaN(cents)) return '$0.00';
@@ -16,7 +18,7 @@ export const Money = {
   }
 };
 
-// --- DATE HELPERS ---
+// ... [Keep existing DATE HELPERS section unchanged] ...
 export const getTodayStr = () => {
   const d = new Date();
   const y = d.getFullYear();
@@ -31,7 +33,7 @@ export const addDays = (dateInput, days) => {
   return date;
 };
 
-// --- RECURRENCE ---
+// ... [Keep existing RECURRENCE section unchanged] ...
 export const getNextDateStr = (currentDateStr, frequency) => {
   if (!currentDateStr) return getTodayStr();
   const [yStr, mStr, dStr] = currentDateStr.split('-');
@@ -73,7 +75,7 @@ export const getPreviousDateStr = (dateStr, frequency) => {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 };
 
-// --- FORECASTING ---
+// ... [Keep existing FORECASTING section unchanged] ...
 export const getOccurrencesInWindow = (startDateStr, frequency, windowStartObj, daysInWindow) => {
   if (!startDateStr) return [];
   const occurrences = [];
@@ -171,40 +173,24 @@ export const getReservedAmount = (items, accountId) => {
         if (item.splitConfig?.isOwedOnly) return sum;
         
         // 1. CLEARED = 0. Always.
+        // Funds are no longer "Reserved" because they are now "Spent" (gone from account).
         if (item.isCleared) return sum;
 
-        // 2. PAID = 0. (Because it is shown as "Pending" in Blue, not Reserved Amber)
+        // 2. PAID = 0. 
+        // If marked paid but not cleared, we usually treat it as Pending (separate calc) or 0 reserved 
+        // depending on your dashboard logic. Current logic treats it as 0 reserved.
         if (item.isPaid) return sum;
 
         let itemTotal = 0;
         
         // 3. ALLOCATED / UNPAID (Sitting in Bucket)
         // Whatever is currently in the bucket is reserved.
+        // We strictly respect the user's manual allocation (currentBalance).
         itemTotal += (item.currentBalance || 0);
 
-        // Special Case: Fixed Bills that are due SOON (within 35 days) but have $0 balance.
-        // We count the amount to show you need this money *now*.
-        if (['bill', 'loan'].includes(item.type) && (item.currentBalance||0) < item.amount) {
-            const today = new Date();
-            const due = new Date(item.date || item.dueDate);
-            const diffTime = due - today;
-            const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-            
-            if (diffDays <= 35) {
-                itemTotal = Math.max(itemTotal, item.amount);
-            }
-        }
-        
-        // Special Case: Fixed Loan-Like Debt
-        if (item.type === 'debt' && item.amount > 0 && !item.targetBalance) {
-             const today = new Date();
-             const due = new Date(item.date || item.dueDate);
-             const diffTime = due - today;
-             const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-             if (diffDays <= 35 && (item.currentBalance || 0) < item.amount) {
-                 itemTotal = Math.max(itemTotal, item.amount);
-             }
-        }
+        // [REMOVED] Special Case: Force reservation for Bills due soon.
+        // [REMOVED] Special Case: Force reservation for Loan-Like Debt.
+        // Logic now strictly relies on item.currentBalance.
 
         return sum + itemTotal;
     }, 0);

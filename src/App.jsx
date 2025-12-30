@@ -531,8 +531,10 @@ export default function App() {
       if (isSimMode) return;
       if (!user) return;
 
+      const type = item.originalType || item.type; // ROBUST FIX: Handle wrapper objects
+
       try {
-          if (item.type === 'debt') {
+          if (type === 'debt') {
               // FOR DEBT: Funds leave Checking Account NOW
               await runTransaction(db, async (transaction) => {
                   const expenseRef = doc(db, 'users', user.uid, 'expenses', item.id);
@@ -567,7 +569,7 @@ export default function App() {
                   transaction.update(checkingRef, { currentBalance: newCheckingBal });
               });
               addToast("Debt Payment Cleared - Funds Deducted");
-          } else if (['bill', 'loan'].includes(item.type)) { 
+          } else if (['bill', 'loan'].includes(type)) { 
               // FOR BILLS/LOANS
               await runTransaction(db, async (transaction) => {
                   const expenseRef = doc(db, 'users', user.uid, 'expenses', item.id);
@@ -579,14 +581,18 @@ export default function App() {
                   
                   const expData = expDoc.data();
 
-                  // Deduct
-                  const newBal = (checkingDoc.data().currentBalance || 0) - item.amount;
+                  // CRITICAL FIX: Deduct FULL amount from DB, not the item wrapper (which might be the reserved amount)
+                  const newBal = (checkingDoc.data().currentBalance || 0) - expData.amount;
                   transaction.update(checkingRef, { currentBalance: newBal });
                   
                   // Advance Date & Reset
+                  // CRITICAL FIX: Reset currentBalance to 0 to remove ghost reservation
                   const nextDate = getNextDateStr(expData.date || expData.dueDate, expData.frequency);
-                  if (expData.date) transaction.update(expenseRef, { date: nextDate, isPaid: false, isCleared: false });
-                  else transaction.update(expenseRef, { dueDate: nextDate, isPaid: false, isCleared: false });
+                  const updates = { isPaid: false, isCleared: false, currentBalance: 0 };
+                  if (expData.date) updates.date = nextDate;
+                  else updates.dueDate = nextDate;
+
+                  transaction.update(expenseRef, updates);
               });
 
               addToast("Transaction Verified & Date Advanced");
@@ -796,14 +802,15 @@ export default function App() {
       // 1. Pending (In Transit)
       if (e.isPaid && !e.isCleared) {
           isPending = true;
-          if (['bill', 'loan'].includes(e.type)) currentRes = e.amount;
+          if (['bill', 'loan'].includes(e.type)) currentRes = e.amount; // Committed funds (Pending)
           else if (e.type === 'debt') currentRes = (e.pendingPayment || e.amount || 0);
+          else currentRes = e.currentBalance || 0;
       } 
       // 2. Allocated (Sitting in Bucket)
       else {
-          if (['bill', 'loan'].includes(e.type)) currentRes = e.amount;
-          else if (e.type === 'debt' && e.amount > 0 && !e.targetBalance) currentRes = e.amount;
-          else currentRes = e.currentBalance || 0;
+          // STRICT FIX: Always respect the user's manual allocation (currentBalance).
+          // Do not override with 'amount' for bills/loans/debts.
+          currentRes = e.currentBalance || 0;
       }
 
       if(targetAcc.type === 'credit' && targetAcc.linkedAccountId) {
@@ -969,18 +976,26 @@ export default function App() {
                 {sortedAccounts.filter(a => !a.isHidden).map(acc => {
                   const strat = transferStrategy[acc.id] || { requiredBalance: 0, pendingBalance: 0, heldForCredit: 0, reservedItems: [] };
                   const isCredit = acc.type === 'credit';
+                  const isTrackingAccount = ['loan', 'investment'].includes(acc.type);
+                  
                   const required = isCredit ? 0 : strat.requiredBalance + strat.heldForCredit;
                   const pending = isCredit ? 0 : strat.pendingBalance;
                   const free = (acc.currentBalance || 0) - required - pending;
-                  const isFullyAllocated = Math.abs(free) < 50 && !isCredit && (acc.currentBalance || 0) > 0;
+                  const isFullyAllocated = Math.abs(free) < 50 && !isCredit && !isTrackingAccount && (acc.currentBalance || 0) > 0;
                   const totalUsed = required + pending + Math.max(0, free);
+
+                  let borderColor = 'border-slate-200 dark:border-slate-800';
+                  if (acc.type === 'loan') borderColor = 'border-blue-200 dark:border-blue-900';
+                  if (acc.type === 'investment') borderColor = 'border-purple-200 dark:border-purple-900';
                   
                   return (
-                    <div key={acc.id} onClick={() => { if(acc.type === 'credit') setPayCardAccount(acc); else setBreakdownModal({ accountId: acc.id, name: acc.name }); }} className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm cursor-pointer hover:border-emerald-500 transition-colors relative overflow-hidden">
+                    <div key={acc.id} onClick={() => { if(acc.type === 'credit') setPayCardAccount(acc); else if (!isTrackingAccount) setBreakdownModal({ accountId: acc.id, name: acc.name }); }} className={`bg-white dark:bg-slate-900 p-6 rounded-2xl border ${borderColor} shadow-sm cursor-pointer hover:border-emerald-500 transition-colors relative overflow-hidden`}>
                       {isFullyAllocated && <div className="absolute top-0 right-0 bg-emerald-100 text-emerald-600 px-3 py-1 rounded-bl-xl text-[10px] font-bold uppercase tracking-wider flex items-center gap-1 shadow-sm"><Medal size={12}/> Zero-Based Hero</div>}
                       <div className="flex justify-between items-center mb-4 mt-2">
                         <div className="flex items-center gap-3">
-                          <div className={`p-3 rounded-xl ${isCredit ? 'bg-indigo-100 text-indigo-600' : 'bg-emerald-100 text-emerald-600'}`}>{isCredit ? <CardIcon size={24}/> : <Building2 size={24}/>}</div>
+                          <div className={`p-3 rounded-xl ${isCredit ? 'bg-indigo-100 text-indigo-600' : (acc.type === 'loan' ? 'bg-blue-100 text-blue-600' : (acc.type === 'investment' ? 'bg-purple-100 text-purple-600' : 'bg-emerald-100 text-emerald-600'))}`}>
+                             {isCredit ? <CardIcon size={24}/> : (acc.type === 'loan' || acc.type === 'investment' ? <TrendingUp size={24}/> : <Building2 size={24}/>)}
+                          </div>
                           <div><h3 className="font-bold text-lg text-slate-800 dark:text-white">{acc.name}</h3><p className="text-xs text-slate-500 uppercase">{acc.type}</p></div>
                         </div>
                         <div className="text-right">
@@ -988,7 +1003,9 @@ export default function App() {
                           {isCredit && <div className="text-xs text-indigo-500 font-bold mt-1">Tap to Pay</div>}
                         </div>
                       </div>
-                      {!isCredit && (
+                      
+                      {/* HIDE RESERVED BAR FOR LOANS/INVESTMENTS */}
+                      {!isCredit && !isTrackingAccount && (
                         <div className="space-y-2">
                           <div className="flex h-2 w-full rounded-full overflow-hidden bg-slate-100 dark:bg-slate-700">
                              {/* BLUE = PENDING */}
