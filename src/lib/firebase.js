@@ -1,7 +1,6 @@
 import { initializeApp } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';
-console.log("🔥 Loaded API Key:", import.meta.env.VITE_FIREBASE_API); // TEMP DEBUG
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API,
   authDomain: "budgeting-app-aacf8.firebaseapp.com",
