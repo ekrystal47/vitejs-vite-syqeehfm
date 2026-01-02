@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { 
   LayoutDashboard, Wallet, Building2, Settings, LogOut, Sun, Moon, Menu, RefreshCw, 
   CheckCircle2, Sparkles, ShieldCheck, TrendingDown, Medal, CreditCard as CardIcon, 
-  Info, TrendingUp, PiggyBank, RotateCcw, Flame, CreditCard, Trash2, Activity, History, Zap, ArrowLeftRight, Check, FlaskConical, XCircle, PieChart, CalendarDays, Edit2
+  Info, TrendingUp, PiggyBank, RotateCcw, Flame, CreditCard, Trash2, Activity, History, Zap, ArrowLeftRight, Check, FlaskConical, XCircle, PieChart, CalendarDays, Edit2, ExternalLink
 } from 'lucide-react';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
 import { 
@@ -25,7 +25,7 @@ import Confetti from './components/ui/Confetti';
 import { SpeedDial, PaydayBanner, CashFlowForecast, PartnerManager, LiquidityTrendChart, GameStats, TrophyCase } from './components/modules/Widgets'; 
 import { 
   DailyAuditModal, CycleEndModal, SafeToSpendInfoModal, CreditPaymentModal, 
-  ReservedBreakdownModal, PartnerIncomeBreakdownModal, ToastContainer, ConfirmationModal 
+  ReservedBreakdownModal, PartnerIncomeBreakdownModal, ToastContainer, ConfirmationModal, AdjustmentModal
 } from './components/modules/HelperModals';
 import TransactionHistoryModal from './components/modules/TransactionHistoryModal'; 
 import QuickLogModal from './components/modules/QuickLogModal'; 
@@ -72,6 +72,7 @@ export default function App() {
   const [toasts, setToasts] = useState([]);
   const [confirmState, setConfirmState] = useState({ isOpen: false });
   const [showConfetti, setShowConfetti] = useState(false); 
+  const [adjustItem, setAdjustItem] = useState(null); // Local state for manual mark paid
   
   // Feature Modals
   const [showQuickLog, setShowQuickLog] = useState(false);
@@ -880,7 +881,6 @@ export default function App() {
     const s = {};
     accounts.forEach(a => s[a.id] = { requiredBalance: 0, pendingBalance: 0, totalFlow: 0, items: [], heldForCredit: 0, reservedItems: [] });
     const primaryIncome = incomes.find(i => i.isPrimary) || incomes[0];
-    const reservedTotal = getReservedAmount(expenses, null); 
 
     expenses.forEach(e => {
       if (e.splitConfig?.isOwedOnly) return;
@@ -892,30 +892,83 @@ export default function App() {
       const dynamicAlloc = calculateDynamicAllocation(e, primaryIncome);
       if(s[e.accountId]) s[e.accountId].totalFlow += dynamicAlloc;
       
-      let currentRes = 0;
-      let isPending = false;
+      let pendingVal = 0;
+      let allocatedVal = 0;
+      const totalInBucket = e.currentBalance || 0;
 
+      // SPLIT LOGIC: SEPARATE PENDING FROM ALLOCATED
       if (e.isPaid && !e.isCleared) {
-          isPending = true;
-          currentRes = e.currentBalance || e.amount || 0; 
-      } else {
-          currentRes = e.currentBalance || 0;
+         // It's paid but not cleared. The amount paid is "pending".
+         // We use e.amount (or amount user entered) as the pending part.
+         pendingVal = e.amount;
+         // The rest is allocated for next month
+         allocatedVal = Math.max(0, totalInBucket - pendingVal);
+      } 
+      else if (e.type === 'debt' && (e.pendingPayment || 0) > 0) {
+         pendingVal = e.pendingPayment;
+         allocatedVal = totalInBucket; 
+      }
+      else {
+         allocatedVal = totalInBucket;
       }
 
-      if(targetAcc.type === 'credit' && targetAcc.linkedAccountId) {
-        const backingId = targetAcc.linkedAccountId;
-        if(s[backingId]) {
-          if (currentRes > 0) {
-            s[backingId].heldForCredit += currentRes;
-            s[backingId].reservedItems.push({ id: e.id, name: `${e.name} (Credit)`, amount: currentRes, type: 'Credit Hold', originalType: e.type, accountId: backingId, pendingPayment: e.pendingPayment, isPaid: e.isPaid, isCleared: e.isCleared });
+      // 1. Handle Pending
+      if (pendingVal > 0) {
+           if(targetAcc.type !== 'credit') {
+               s[e.accountId].pendingBalance += pendingVal;
+               s[e.accountId].reservedItems.push({ 
+                   id: e.id, 
+                   name: e.name, 
+                   amount: pendingVal, 
+                   type: 'Pending Clearance', 
+                   originalType: e.type, 
+                   accountId: e.accountId, 
+                   isPending: true,
+                   date: e.date || e.dueDate 
+               });
+           }
+      }
+
+      // 2. Handle Allocated
+      if (allocatedVal > 0) {
+          // CALCULATE DISPLAY DATE:
+          // If the bill is Paid (pending clearance), this allocation is for the NEXT due date.
+          // Otherwise, it is for the current due date.
+          const isBillType = ['bill', 'loan', 'subscription'].includes(e.type);
+          const currentDueDate = e.date || e.dueDate;
+          const displayDate = (isBillType && e.isPaid && !e.isCleared) 
+                              ? getNextDateStr(currentDueDate, e.frequency) 
+                              : currentDueDate;
+
+          if(targetAcc.type === 'credit' && targetAcc.linkedAccountId) {
+            const backingId = targetAcc.linkedAccountId;
+            if(s[backingId]) {
+                s[backingId].heldForCredit += allocatedVal;
+                s[backingId].reservedItems.push({ 
+                    id: e.id, 
+                    name: `${e.name} (Credit Hold)`, 
+                    amount: allocatedVal, 
+                    type: 'Credit Hold', 
+                    originalType: e.type, 
+                    accountId: backingId, 
+                    isPending: false,
+                    date: displayDate
+                });
+            }
           }
-        }
-      }
-      if(targetAcc.type !== 'credit') {
-        if(isPending) s[e.accountId].pendingBalance += currentRes;
-        else s[e.accountId].requiredBalance += currentRes;
-
-        if(currentRes > 0) s[e.accountId].reservedItems.push({ id: e.id, name: e.name, amount: currentRes, type: isPending ? 'Pending Clearance' : e.type, originalType: e.type, accountId: e.accountId, pendingPayment: e.pendingPayment, isPaid: e.isPaid, isCleared: e.isCleared });
+          else if(targetAcc.type !== 'credit') {
+            s[e.accountId].requiredBalance += allocatedVal;
+            s[e.accountId].reservedItems.push({ 
+                id: e.id, 
+                name: e.name, 
+                amount: allocatedVal, 
+                type: e.type, 
+                originalType: e.type, 
+                accountId: e.accountId, 
+                isPending: false,
+                date: displayDate
+            });
+          }
       }
     });
     return s;
@@ -969,13 +1022,24 @@ export default function App() {
                const occs = getOccurrencesInWindow(startDate, e.frequency, windowStart, 90);
                occs.forEach(dateStr => {
                    const isCurrentCycle = dateStr === startDate;
-                   if (isCurrentCycle && e.isPaid) { return; }
-                   items.push({ id: e.id, name: e.name, amount: e.amount, date: dateStr, original: e, status: isCurrentCycle ? 'Due Soon' : 'Upcoming' });
+                   
+                   // Logic for Forecast View:
+                   // SHOW ALL OCCURRENCES. Do not hide paid items. 
+                   // The status badge and buttons will be determined in the Render Loop.
+                   items.push({ 
+                       id: e.id, 
+                       name: e.name, 
+                       amount: e.amount, 
+                       date: dateStr, 
+                       original: e, // Pass original reference for actions
+                       status: isCurrentCycle ? 'Due Soon' : 'Upcoming' 
+                   });
                });
           }
       });
       return items.sort((a,b) => {
-          const d1 = new Date(a.date + 'T12:00:00'); // Force local time logic by adding noon
+          // Force local time interpretation to fix off-by-one error
+          const d1 = new Date(a.date + 'T12:00:00'); 
           const d2 = new Date(b.date + 'T12:00:00');
           return d1 - d2;
       });
@@ -1170,13 +1234,6 @@ export default function App() {
                   <button onClick={() => setBudgetView('upcoming')} className={`px-6 py-2 rounded-lg text-sm font-bold transition-all ${budgetView === 'upcoming' ? 'bg-slate-800 text-white shadow-lg' : 'text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800'}`}>Upcoming Plan</button>
                   <button onClick={() => setBudgetView('history')} className={`px-6 py-2 rounded-lg text-sm font-bold transition-all ${budgetView === 'history' ? 'bg-slate-800 text-white shadow-lg' : 'text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800'}`}>History</button>
                 </div>
-                {budgetView === 'upcoming' && (
-                  <div className="flex gap-2">
-                    <button onClick={() => setSortType('date')} className={`px-4 py-1 rounded-full text-xs font-bold border ${sortType === 'date' ? 'bg-slate-800 text-white' : 'bg-white text-slate-600'}`}>Sort Date</button>
-                    <button onClick={() => setSortType('amount')} className={`px-4 py-1 rounded-full text-xs font-bold border ${sortType === 'amount' ? 'bg-slate-800 text-white' : 'bg-white text-slate-600'}`}>Sort Amount</button>
-                    <button onClick={() => setSortType('frequency')} className={`px-4 py-1 rounded-full text-xs font-bold border ${sortType === 'frequency' ? 'bg-slate-800 text-white' : 'bg-white text-slate-600'}`}>Sort Freq</button>
-                  </div>
-                )}
                 {subBleed > 0 && <div className="text-xs font-bold text-orange-600 flex items-center gap-1"><RefreshCw size={12}/> Subscription Bleed: {Money.format(subBleed)}/mo</div>}
               </div>
 
@@ -1189,28 +1246,53 @@ export default function App() {
                       <h3 className="font-bold text-slate-700 dark:text-slate-300">Projected Expenses (90 Days)</h3>
                     </div>
                     <div className="divide-y divide-slate-100 dark:divide-slate-800 max-h-[400px] overflow-y-auto custom-scrollbar">
-                       {forecastFeed.map((item, idx) => {
-                         const dateObj = new Date(item.date);
-                         const dayName = dateObj.toLocaleDateString('en-US', { weekday: 'short' });
-                         const monthDay = dateObj.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-                         
-                         return (
-                           <div key={`${item.id}-${item.date}-${idx}`} className="flex items-center justify-between p-4 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors">
+                        {forecastFeed.map((item, idx) => {
+                          // FIX: Use T12:00:00 to prevent local time shift to previous day
+                          const dateObj = new Date(item.date + 'T12:00:00');
+                          const dayName = dateObj.toLocaleDateString('en-US', { weekday: 'short' });
+                          const monthDay = dateObj.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+                          
+                          // FIX: Only show "PENDING" if this specific occurrence is the one that was paid.
+                          // i.e., Does this forecast item's date match the due date currently stored on the original object?
+                          const isEffectivePaid = item.original.isPaid && (item.date === (item.original.date || item.original.dueDate));
+                          const isCleared = item.original.isCleared;
+                          
+                          return (
+                            <div key={`${item.id}-${item.date}-${idx}`} className="flex items-center justify-between p-4 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors">
                               <div className="flex items-center gap-4">
                                  <div className="text-center w-12">
                                    <div className="text-[10px] font-bold text-slate-400 uppercase">{dayName}</div>
                                    <div className="font-bold text-slate-800 dark:text-white">{monthDay}</div>
                                  </div>
                                  <div>
-                                   <div className="font-bold text-slate-800 dark:text-white">{item.name}</div>
+                                   <div className="font-bold text-slate-800 dark:text-white flex items-center gap-2">
+                                       {item.name}
+                                       {isEffectivePaid && !isCleared && <span className="text-[9px] bg-blue-100 text-blue-600 px-2 py-0.5 rounded-full font-bold">PENDING</span>}
+                                   </div>
                                    <div className="text-xs text-slate-500">{item.status}</div>
                                  </div>
                               </div>
-                              <div className="font-bold text-slate-800 dark:text-white">{Money.format(item.amount)}</div>
-                           </div>
-                         );
-                       })}
-                       {forecastFeed.length === 0 && <div className="p-8 text-center text-slate-400">No upcoming expenses found.</div>}
+                              <div className="flex items-center gap-4">
+                                  <div className="font-bold text-slate-800 dark:text-white">{Money.format(item.amount)}</div>
+                                  
+                                  {/* NEW ACTION BUTTONS FOR FORECAST VIEW */}
+                                  <div className="flex gap-2">
+                                      {isEffectivePaid && !isCleared && (
+                                          <button onClick={(e) => { e.stopPropagation(); handleClearTransaction(item.original); }} className="p-2 bg-white dark:bg-slate-800 text-blue-600 border border-blue-200 dark:border-blue-700 rounded-lg hover:scale-105 transition-transform" title="Clear">
+                                              <ExternalLink size={16}/>
+                                          </button>
+                                      )}
+                                      {!isEffectivePaid && (
+                                          <button onClick={(e) => { e.stopPropagation(); setAdjustItem(item.original); }} className="p-2 bg-emerald-100 text-emerald-600 rounded-lg hover:bg-emerald-200 transition-colors" title="Mark Paid">
+                                              <Check size={16}/>
+                                          </button>
+                                      )}
+                                  </div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                        {forecastFeed.length === 0 && <div className="p-8 text-center text-slate-400">No upcoming expenses found.</div>}
                     </div>
                   </div>
                   
@@ -1494,6 +1576,15 @@ export default function App() {
          title={confirmState.title} 
          message={confirmState.message} 
          actionLabel={confirmState.actionLabel} 
+      />
+      
+      {/* App-Level Adjustment Modal for Budget View */}
+      <AdjustmentModal 
+          isOpen={!!adjustItem} 
+          onClose={() => setAdjustItem(null)} 
+          item={adjustItem} 
+          onConfirm={(item, amt) => updateExpense(item.id, 'isPaid', true, amt)} 
+          actionLabel="Confirm & Mark Paid"
       />
     </div>
   );
