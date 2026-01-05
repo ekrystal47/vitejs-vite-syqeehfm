@@ -2,13 +2,13 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   X, Check, Calendar, Repeat, DollarSign, Tag, User, CreditCard, 
   Wallet, PiggyBank, TrendingUp, Landmark, ShieldCheck, RefreshCw, 
-  ChevronDown, ArrowRight, Target, Infinity, Building2, Zap 
+  ChevronDown, ArrowRight, Target, Infinity, Building2, Zap, Link as LinkIcon 
 } from 'lucide-react';
 import { Money, calculateIdealBalance, getTodayStr, getPreviousDateStr } from '../../lib/finance';
 
 // --- HELPER COMPONENTS ---
 
-const MoneyInput = ({ value, onChange, placeholder = "0.00" }) => {
+const MoneyInput = ({ value, onChange, placeholder = "0.00", disabled = false }) => {
   const [displayValue, setDisplayValue] = useState('');
   const inputRef = useRef(null);
 
@@ -32,7 +32,7 @@ const MoneyInput = ({ value, onChange, placeholder = "0.00" }) => {
   };
 
   return (
-    <div className="relative flex items-center">
+    <div className={`relative flex items-center ${disabled ? 'opacity-50' : ''}`}>
       <span className="absolute left-3 text-slate-400 font-bold text-lg">$</span>
       <input
         ref={inputRef}
@@ -41,8 +41,9 @@ const MoneyInput = ({ value, onChange, placeholder = "0.00" }) => {
         value={displayValue}
         onChange={handleChange}
         onBlur={handleBlur}
+        disabled={disabled}
         onFocus={(e) => e.target.select()}
-        className="w-full pl-7 pr-3 py-3 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl font-bold text-slate-800 dark:text-white text-lg focus:border-emerald-500 outline-none transition-all"
+        className="w-full pl-7 pr-3 py-3 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl font-bold text-slate-800 dark:text-white text-lg focus:border-emerald-500 outline-none transition-all disabled:cursor-not-allowed"
         placeholder={placeholder}
       />
     </div>
@@ -128,6 +129,10 @@ const UnifiedEntryModal = ({ isOpen, onClose, onSave, accounts, initialData, inc
           if (!initData.accountType && initData.type) initData.accountType = initData.type;
           if (initData.autoConfig) setShowAutoConfig(true);
         }
+        
+        // Ensure linkedAccountIds exists
+        if (!initData.linkedAccountIds) initData.linkedAccountIds = [];
+
         setFormData(initData);
 
         // Restore Settings
@@ -181,9 +186,11 @@ const UnifiedEntryModal = ({ isOpen, onClose, onSave, accounts, initialData, inc
           targetDate: '', dueDate: '', addedFunds: 0, rollover: 0, spent: 0,
           currentBalance: 0, totalDebtBalance: 0, interestRate: 0, targetBalance: 0,
           savingsType: 'goal', isDiscretionary: false, linkedAccountId: '',
-          isEssential: true, isSubscription: false, fundedFromId: '', // New Daisy Chain field
+          isEssential: true, isSubscription: false, fundedFromId: '', 
           splitConfig: { isSplit: false, partnerId: '', partnerAmount: 0, payer: 'me', isOwedOnly: false },
-          autoConfig: { isAuto: false, amount: 0, frequency: 'Monthly' } // New Auto Config
+          autoConfig: { isAuto: false, amount: 0, frequency: 'Monthly' }, 
+          retirementType: 'none', isPreTax: false,
+          linkedAccountIds: [] 
         });
       }
       setUserEditedBalance(false);
@@ -214,6 +221,16 @@ const UnifiedEntryModal = ({ isOpen, onClose, onSave, accounts, initialData, inc
     }
   }, [idealData, isOpen, initialData, userEditedBalance, formData.currentBalance, mode]);
 
+  // FIX: Moved useMemo for linkedTotal UP here, BEFORE the early return
+  const linkedTotal = useMemo(() => {
+      if (!formData.linkedAccountIds || formData.linkedAccountIds.length === 0) return 0;
+      return formData.linkedAccountIds.reduce((sum, id) => {
+          const acc = accounts.find(a => a.id === id);
+          return sum + (acc?.currentBalance || 0);
+      }, 0);
+  }, [formData.linkedAccountIds, accounts]);
+
+  // NOW we can check for return
   if (!isOpen) return null;
 
   const handleChange = (field, value) => {
@@ -244,6 +261,18 @@ const UnifiedEntryModal = ({ isOpen, onClose, onSave, accounts, initialData, inc
           ...prev,
           autoConfig: { ...(prev.autoConfig || { isAuto: false, amount: 0, frequency: 'Monthly' }), [field]: value }
       }));
+  };
+
+  const toggleLinkedAccount = (accId) => {
+      setFormData(prev => {
+          const current = prev.linkedAccountIds || [];
+          const exists = current.includes(accId);
+          let newIds;
+          if (exists) newIds = current.filter(id => id !== accId);
+          else newIds = [...current, accId];
+          
+          return { ...prev, linkedAccountIds: newIds };
+      });
   };
 
   const handleSave = () => {
@@ -353,7 +382,7 @@ const UnifiedEntryModal = ({ isOpen, onClose, onSave, accounts, initialData, inc
             <input className="w-full p-3 bg-slate-50 dark:bg-slate-900 dark:text-white border border-slate-200 dark:border-slate-700 rounded-xl font-bold outline-none" placeholder="e.g. Rent, Groceries, Paycheck" value={formData.name || ''} onChange={e => handleChange('name', e.target.value)}/>
           </div>
 
-          {/* === SAVINGS MODE (Updated with Split) === */}
+          {/* === SAVINGS MODE (Updated with Split & Tags) === */}
           {mode === 'savings' && (
             <>
               <div className="flex bg-slate-100 dark:bg-slate-800 p-1 rounded-xl mb-4">
@@ -363,6 +392,29 @@ const UnifiedEntryModal = ({ isOpen, onClose, onSave, accounts, initialData, inc
                  <button onClick={() => setSavingsType('revolving')} className={`flex-1 py-2 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-2 ${savingsType === 'revolving' ? 'bg-white dark:bg-slate-700 shadow-sm text-purple-700 dark:text-white' : 'text-slate-500 hover:text-slate-700 dark:hover:text-slate-300'}`}>
                     <Infinity size={14} /> Revolving Fund
                  </button>
+              </div>
+
+              {/* NEW TAX & RETIREMENT TAGGING */}
+              <div className="bg-emerald-50 dark:bg-emerald-900/10 p-3 rounded-xl border border-emerald-100 dark:border-emerald-900/50 mb-4">
+                  <div className="grid grid-cols-2 gap-4">
+                      <div>
+                          <label className="text-[9px] font-bold text-emerald-700 dark:text-emerald-400 uppercase mb-1 block">Tax Bucket Tag</label>
+                          <select className="w-full p-2 bg-white dark:bg-slate-800 dark:text-white border border-emerald-200 dark:border-emerald-700 rounded-lg text-xs font-bold outline-none" value={formData.retirementType || 'none'} onChange={e => handleChange('retirementType', e.target.value)}>
+                              <option value="none">Standard / None</option>
+                              <option value="401k">401k / 403b</option>
+                              <option value="ira">IRA / Roth IRA</option>
+                              <option value="hsa">HSA / FSA</option>
+                              <option value="taxable">Taxable Brokerage</option>
+                          </select>
+                      </div>
+                      <div className="flex flex-col justify-end pb-2">
+                          <div className="flex items-center justify-between">
+                              <label className="text-[9px] font-bold text-emerald-700 dark:text-emerald-400 uppercase">Deducted from Pay?</label>
+                              <ToggleSwitch checked={formData.isPreTax || false} onChange={v => handleChange('isPreTax', v)} />
+                          </div>
+                          <div className="text-[9px] text-emerald-600 dark:text-emerald-500 mt-1 leading-tight">If ON, this won't reduce your spendable budget (Net Income).</div>
+                      </div>
+                  </div>
               </div>
 
               <div className="grid grid-cols-2 gap-4">
@@ -416,18 +468,48 @@ const UnifiedEntryModal = ({ isOpen, onClose, onSave, accounts, initialData, inc
                 <>
                   <div><label className="text-[10px] font-bold text-slate-400 uppercase mb-1 block">Next Contribution Date</label><DateInput value={formData.date || formData.nextDate} onChange={e => handleChange('date', e.target.value)} label="" /></div>
                   
-                  <div className="grid grid-cols-2 gap-4">
-                    {savingsType === 'goal' && (
-                        <div><label className="text-[10px] font-bold text-slate-400 uppercase mb-1 block">Target Goal (Total)</label><MoneyInput value={formData.targetBalance} onChange={e => handleChange('targetBalance', e)} /></div>
-                    )}
-                    <div className={savingsType === 'revolving' ? 'col-span-2' : ''}><label className="text-[10px] font-bold text-slate-400 uppercase mb-1 block">Held in Account</label><select className="w-full p-3 bg-slate-50 dark:bg-slate-900 dark:text-white border border-slate-200 dark:border-slate-700 rounded-xl text-sm font-bold outline-none" value={formData.accountId || ''} onChange={e => handleChange('accountId', e.target.value)}>{(accounts.filter(a => ['checking','savings'].includes(a.type))||[]).map(a => <option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
+                  {/* MULTI-ACCOUNT LINKING */}
+                  <div className="mt-4">
+                      <label className="text-[10px] font-bold text-slate-400 uppercase mb-2 flex items-center gap-2"><LinkIcon size={12}/> Link Accounts (Auto-Track Progress)</label>
+                      <div className="max-h-32 overflow-y-auto custom-scrollbar p-2 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl space-y-2">
+                          {(accounts.filter(a => ['checking','savings','investment'].includes(a.type))||[]).map(a => {
+                              const isSelected = (formData.linkedAccountIds || []).includes(a.id);
+                              return (
+                                  <div 
+                                    key={a.id} 
+                                    onClick={() => toggleLinkedAccount(a.id)}
+                                    className={`flex items-center justify-between p-2 rounded-lg cursor-pointer transition-colors border ${isSelected ? 'bg-indigo-50 border-indigo-200 dark:bg-indigo-900/30 dark:border-indigo-700' : 'bg-white border-transparent hover:bg-slate-100 dark:bg-slate-800 dark:hover:bg-slate-700'}`}
+                                  >
+                                      <div className="text-xs font-bold text-slate-700 dark:text-slate-300">{a.name}</div>
+                                      {isSelected && <Check size={14} className="text-indigo-600 dark:text-indigo-400" />}
+                                  </div>
+                              );
+                          })}
+                          {accounts.length === 0 && <div className="text-[10px] text-slate-400 text-center">No accounts available to link.</div>}
+                      </div>
                   </div>
+
+                  {savingsType === 'goal' && (
+                        <div className="mt-4"><label className="text-[10px] font-bold text-slate-400 uppercase mb-1 block">Target Goal (Total)</label><MoneyInput value={formData.targetBalance} onChange={e => handleChange('targetBalance', e)} /></div>
+                  )}
                   
-                  <div className="bg-purple-50 dark:bg-purple-900/20 p-4 rounded-xl border border-purple-100 dark:border-purple-800 space-y-2 mt-2">
-                    <div className="flex justify-between items-center"><label className="text-[10px] font-bold text-purple-800 dark:text-purple-300 uppercase">Already Saved?</label></div>
-                    <MoneyInput value={formData.currentBalance} onChange={(e) => handleChange('currentBalance', e)} />
+                  <div className="bg-purple-50 dark:bg-purple-900/20 p-4 rounded-xl border border-purple-100 dark:border-purple-800 space-y-2 mt-4">
+                    <div className="flex justify-between items-center">
+                        <label className="text-[10px] font-bold text-purple-800 dark:text-purple-300 uppercase">
+                            {(formData.linkedAccountIds && formData.linkedAccountIds.length > 0) ? "Total Tracked (Auto)" : "Already Saved (Manual)"}
+                        </label>
+                    </div>
+                    {/* If linked, disable input and show total. If not, enable input. */}
+                    <MoneyInput 
+                        value={(formData.linkedAccountIds && formData.linkedAccountIds.length > 0) ? linkedTotal : formData.currentBalance} 
+                        onChange={(e) => handleChange('currentBalance', e)} 
+                        disabled={formData.linkedAccountIds && formData.linkedAccountIds.length > 0}
+                    />
                     <p className="text-[10px] text-purple-600 dark:text-purple-400 italic">
-                        {savingsType === 'goal' ? 'Progress towards your target.' : 'Existing funds in this bucket.'}
+                        {formData.linkedAccountIds?.length > 0 
+                             ? `Automatically summing ${formData.linkedAccountIds.length} linked account(s).` 
+                             : (savingsType === 'goal' ? 'Progress towards your target.' : 'Existing funds in this bucket.')
+                        }
                     </p>
                   </div>
                 </>
@@ -558,6 +640,21 @@ const UnifiedEntryModal = ({ isOpen, onClose, onSave, accounts, initialData, inc
                  <div><label className="text-[10px] font-bold text-slate-400 uppercase mb-1 block">Paid from (Backing Account)</label><select className="w-full p-3 bg-slate-50 dark:bg-slate-900 dark:text-white border border-slate-200 dark:border-slate-700 rounded-xl text-sm font-bold outline-none" value={formData.linkedAccountId || ''} onChange={e => handleChange('linkedAccountId', e.target.value)}><option value="">Select Checking Account</option>{accounts.filter(a => a.type === 'checking').map(a => <option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
                )}
                
+               {/* NEW: RETIREMENT TAGGING FOR ACCOUNTS */}
+               {['savings', 'investment'].includes(formData.accountType) && (
+                   <div className="mt-4 pt-4 border-t border-slate-100 dark:border-slate-700">
+                       <label className="text-[9px] font-bold text-emerald-700 dark:text-emerald-400 uppercase mb-1 block">Tax Bucket Tag (Optional)</label>
+                       <select className="w-full p-2 bg-white dark:bg-slate-800 dark:text-white border border-slate-200 dark:border-slate-600 rounded-lg text-xs font-bold outline-none" value={formData.retirementType || 'none'} onChange={e => handleChange('retirementType', e.target.value)}>
+                           <option value="none">Standard / None</option>
+                           <option value="401k">401k / 403b</option>
+                           <option value="ira">IRA / Roth IRA</option>
+                           <option value="hsa">HSA / FSA</option>
+                           <option value="taxable">Taxable Brokerage</option>
+                       </select>
+                       <p className="text-[9px] text-slate-400 mt-1">Tagging this helps the Independence page calculate tax efficiency.</p>
+                   </div>
+               )}
+
                {/* NEW: DAISY CHAIN & AUTOMATION LOGIC */}
                {['checking','savings'].includes(formData.accountType) && (
                    <div className="mt-4 pt-4 border-t border-slate-100 dark:border-slate-700">

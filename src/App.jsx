@@ -51,6 +51,9 @@ export default function App() {
   const [transactions, setTransactions] = useState([]); 
   const [gameStats, setGameStats] = useState({ level: 1, xp: 0, streak: 0, lastAuditDate: '', nextLevelXP: 100, badges: [] });
 
+  // --- NEW: FIRE SETTINGS PERSISTENCE ---
+  const [fireSettings, setFireSettings] = useState(null);
+
   // --- SIMULATION STATE ---
   const [isSimMode, setIsSimMode] = useState(false);
   const [simData, setSimData] = useState({ accounts: [], incomes: [], expenses: [], partners: [] });
@@ -199,12 +202,38 @@ export default function App() {
         }
     });
 
+    // NEW: FIRE Settings Listener
+    const unsubFire = onSnapshot(doc(db, 'users', user.uid, 'settings', 'fire_config'), (doc) => {
+        if (doc.exists()) {
+            setFireSettings(doc.data());
+        } else {
+            setFireSettings({});
+        }
+    });
+
     const unsubTransactions = onSnapshot(query(getPath('transactions'), orderBy('createdAt', 'desc'), limit(100)), (snap) => {
         setTransactions(snap.docs.map(d => ({ id: d.id, ...d.data() })));
     });
 
-    return () => { unsubAccounts(); unsubIncomes(); unsubExpenses(); unsubPartners(); unsubSnapshots(); unsubTransactions(); unsubGame(); };
+    return () => { unsubAccounts(); unsubIncomes(); unsubExpenses(); unsubPartners(); unsubSnapshots(); unsubTransactions(); unsubGame(); unsubFire(); };
   }, [user]);
+
+  // NEW: Fire Settings Update Handler
+  const updateFireSettings = async (newSettings) => {
+      if (isSimMode) {
+          setFireSettings(prev => ({ ...prev, ...newSettings }));
+          addToast("Settings Saved (Sim)");
+          return;
+      }
+      if (!user) return;
+      try {
+          await setDoc(doc(db, 'users', user.uid, 'settings', 'fire_config'), newSettings, { merge: true });
+          addToast("Settings Saved");
+      } catch (e) {
+          console.error("Failed to save FIRE settings", e);
+          addToast("Save Failed", "error");
+      }
+  };
 
   // --- DERIVED INCOMES ---
   const derivedIncomes = useMemo(() => {
@@ -769,7 +798,6 @@ export default function App() {
         let logType = '';
 
         await runTransaction(db, async (transaction) => {
-          // READ FIRST
           const expDoc = await transaction.get(expRef);
           if(!expDoc.exists()) throw "Expense not found";
           const exp = expDoc.data();
@@ -814,7 +842,6 @@ export default function App() {
                 let amountToPay = exp.amount || 0;
                 if (customAmountStr) amountToPay = Money.toCents(customAmountStr);
 
-                // Reserve the EXACT amount paid
                 transaction.update(expRef, { isPaid: true, isCleared: false, currentBalance: amountToPay });
                 logAmount = -amountToPay;
                 logType = 'bill_paid';
@@ -896,12 +923,8 @@ export default function App() {
       let allocatedVal = 0;
       const totalInBucket = e.currentBalance || 0;
 
-      // SPLIT LOGIC: SEPARATE PENDING FROM ALLOCATED
       if (e.isPaid && !e.isCleared) {
-         // It's paid but not cleared. The amount paid is "pending".
-         // We use e.amount (or amount user entered) as the pending part.
          pendingVal = e.amount;
-         // The rest is allocated for next month
          allocatedVal = Math.max(0, totalInBucket - pendingVal);
       } 
       else if (e.type === 'debt' && (e.pendingPayment || 0) > 0) {
@@ -912,7 +935,6 @@ export default function App() {
          allocatedVal = totalInBucket;
       }
 
-      // 1. Handle Pending
       if (pendingVal > 0) {
            if(targetAcc.type !== 'credit') {
                s[e.accountId].pendingBalance += pendingVal;
@@ -929,11 +951,7 @@ export default function App() {
            }
       }
 
-      // 2. Handle Allocated
       if (allocatedVal > 0) {
-          // CALCULATE DISPLAY DATE:
-          // If the bill is Paid (pending clearance), this allocation is for the NEXT due date.
-          // Otherwise, it is for the current due date.
           const isBillType = ['bill', 'loan', 'subscription'].includes(e.type);
           const currentDueDate = e.date || e.dueDate;
           const displayDate = (isBillType && e.isPaid && !e.isCleared) 
@@ -985,7 +1003,6 @@ export default function App() {
     return totalSafe;
   }, [accounts, transferStrategy]);
 
-  // Sorting
   const sortedAccounts = useMemo(() => {
     const typeOrder = { 'checking': 0, 'credit': 1, 'loan': 2, 'savings': 3, 'investment': 4 };
     return [...accounts].sort((a, b) => {
@@ -1013,36 +1030,26 @@ export default function App() {
   const forecastFeed = useMemo(() => {
       if (!expenses.length) return [];
       const items = [];
-      const now = new Date();
       const windowStart = new Date();
-      
-      // Removed filter to include ALL types (bill, loan, subscription, debt, savings, variable if dated)
       expenses.forEach(e => {
-           // Skip tracker-only splits
-           if (e.splitConfig?.isOwedOnly) return; 
-
-           const startDate = e.date || e.dueDate || e.nextDate;
-           if (!startDate) return; // Skip items without dates (e.g. undated variable buckets)
-
-           const occs = getOccurrencesInWindow(startDate, e.frequency, windowStart, 90);
-           occs.forEach(dateStr => {
-               const isCurrentCycle = dateStr === startDate;
-               
-               // Logic for Forecast View:
-               // SHOW ALL OCCURRENCES. Do not hide paid items. 
-               // The status badge and buttons will be determined in the Render Loop.
-               items.push({ 
-                   id: e.id, 
-                   name: e.name, 
-                   amount: e.amount, 
-                   date: dateStr, 
-                   original: e, // Pass original reference for actions
-                   status: isCurrentCycle ? 'Due Soon' : 'Upcoming' 
+          if (['bill', 'subscription', 'loan'].includes(e.type)) {
+               const startDate = e.date || e.dueDate || e.nextDate;
+               if (!startDate) return;
+               const occs = getOccurrencesInWindow(startDate, e.frequency, windowStart, 90);
+               occs.forEach(dateStr => {
+                   const isCurrentCycle = dateStr === startDate;
+                   items.push({ 
+                       id: e.id, 
+                       name: e.name, 
+                       amount: e.amount, 
+                       date: dateStr, 
+                       original: e, 
+                       status: isCurrentCycle ? 'Due Soon' : 'Upcoming' 
+                   });
                });
-           });
+          }
       });
       return items.sort((a,b) => {
-          // Force local time interpretation to fix off-by-one error
           const d1 = new Date(a.date + 'T12:00:00'); 
           const d2 = new Date(b.date + 'T12:00:00');
           return d1 - d2;
@@ -1153,6 +1160,12 @@ export default function App() {
                   if (acc.type === 'loan') borderColor = 'border-blue-200 dark:border-blue-900';
                   if (acc.type === 'investment') borderColor = 'border-purple-200 dark:border-purple-900';
 
+                  // LINKED AGGREGATION LOGIC: 
+                  // If this account is linked to savings goals, we might want to show that here, 
+                  // but typically we aggregate UP to the savings goal card, not down to the account card.
+                  // The prompt requested aggregation on the "Savings Goal" display (in Budget/Dashboard lists),
+                  // which is handled in the Expenses map loop below.
+                  
                   return (
                     <div key={acc.id} onClick={() => { if(acc.type === 'credit') setPayCardAccount(acc); else if (!isTrackingAccount) setBreakdownModal({ accountId: acc.id, name: acc.name }); }} className={`bg-white dark:bg-slate-900 p-6 rounded-2xl border ${borderColor} shadow-sm cursor-pointer hover:border-emerald-500 transition-colors relative overflow-hidden`}>
                       {isFullyAllocated && <div className="absolute top-0 right-0 bg-emerald-100 text-emerald-600 px-3 py-1 rounded-bl-xl text-[10px] font-bold uppercase tracking-wider flex items-center gap-1 shadow-sm"><Medal size={12}/> Zero-Based Hero</div>}
@@ -1229,7 +1242,17 @@ export default function App() {
              </div>
           )}
 
-          {activeTab === 'fire' && <FireDashboard expenses={expenses} incomes={derivedIncomes} accounts={accounts} />}
+          {/* UPDATED: Pass settings and update function to FireDashboard */}
+          {activeTab === 'fire' && (
+             <FireDashboard 
+                 expenses={expenses} 
+                 incomes={derivedIncomes} 
+                 accounts={accounts} 
+                 updateAccount={updateAccount}
+                 fireSettings={fireSettings}
+                 updateFireSettings={updateFireSettings}
+             />
+          )}
 
           {activeTab === 'budget' && (
             <div className="w-full space-y-6 animate-in slide-in-from-right-4">
@@ -1356,6 +1379,15 @@ export default function App() {
                             const linkedAccountForDebt = type === 'debt' ? accounts.find(a => a.id === item.totalDebtBalance) : null;
                             const isCreditDebt = linkedAccountForDebt?.type === 'credit';
 
+                            // --- NEW: MULTI-ACCOUNT SAVINGS AGGREGATION LOGIC ---
+                            let displayBalance = item.currentBalance;
+                            if (type === 'savings' && item.linkedAccountIds && item.linkedAccountIds.length > 0) {
+                                displayBalance = item.linkedAccountIds.reduce((sum, id) => {
+                                    const acc = accounts.find(a => a.id === id);
+                                    return sum + (acc ? (acc.currentBalance || 0) : 0);
+                                }, 0);
+                            }
+
                             return (
                               <ItemCard 
                                 key={item.id} 
@@ -1372,7 +1404,7 @@ export default function App() {
                                 progress={type==='variable' ? progress : undefined} 
                                 date={item.date || item.dueDate}
                                 type={type} 
-                                currentBalance={item.currentBalance}
+                                currentBalance={displayBalance} // Use aggregated balance
                                 savingsType={item.savingsType} 
                                 targetAmount={item.targetBalance}
                                 pendingPayment={item.pendingPayment} 
