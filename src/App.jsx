@@ -1015,27 +1015,31 @@ export default function App() {
       const items = [];
       const now = new Date();
       const windowStart = new Date();
+      
+      // Removed filter to include ALL types (bill, loan, subscription, debt, savings, variable if dated)
       expenses.forEach(e => {
-          if (['bill', 'subscription', 'loan'].includes(e.type)) {
-               const startDate = e.date || e.dueDate || e.nextDate;
-               if (!startDate) return;
-               const occs = getOccurrencesInWindow(startDate, e.frequency, windowStart, 90);
-               occs.forEach(dateStr => {
-                   const isCurrentCycle = dateStr === startDate;
-                   
-                   // Logic for Forecast View:
-                   // SHOW ALL OCCURRENCES. Do not hide paid items. 
-                   // The status badge and buttons will be determined in the Render Loop.
-                   items.push({ 
-                       id: e.id, 
-                       name: e.name, 
-                       amount: e.amount, 
-                       date: dateStr, 
-                       original: e, // Pass original reference for actions
-                       status: isCurrentCycle ? 'Due Soon' : 'Upcoming' 
-                   });
+           // Skip tracker-only splits
+           if (e.splitConfig?.isOwedOnly) return; 
+
+           const startDate = e.date || e.dueDate || e.nextDate;
+           if (!startDate) return; // Skip items without dates (e.g. undated variable buckets)
+
+           const occs = getOccurrencesInWindow(startDate, e.frequency, windowStart, 90);
+           occs.forEach(dateStr => {
+               const isCurrentCycle = dateStr === startDate;
+               
+               // Logic for Forecast View:
+               // SHOW ALL OCCURRENCES. Do not hide paid items. 
+               // The status badge and buttons will be determined in the Render Loop.
+               items.push({ 
+                   id: e.id, 
+                   name: e.name, 
+                   amount: e.amount, 
+                   date: dateStr, 
+                   original: e, // Pass original reference for actions
+                   status: isCurrentCycle ? 'Due Soon' : 'Upcoming' 
                });
-          }
+           });
       });
       return items.sort((a,b) => {
           // Force local time interpretation to fix off-by-one error

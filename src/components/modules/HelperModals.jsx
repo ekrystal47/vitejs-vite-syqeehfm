@@ -18,20 +18,20 @@ export const ToastContainer = ({ toasts, removeToast }) => (
   </div>
 );
 
-// 2. Adjustment Modal (FIXED DECIMAL LOGIC)
+// 2. Adjustment Modal (FIXED: Cents Handling)
 export const AdjustmentModal = ({ isOpen, onClose, item, onConfirm, actionLabel = "Confirm" }) => {
-    const [amount, setAmount] = useState(''); // Stores CENTS (Integer)
+    const [amount, setAmount] = useState(0); // Stores CENTS (Integer)
     
     useEffect(() => {
         if(item) {
-            // FIX: Pass raw cents to MoneyInput. It handles the display conversion.
+            // FIX: Pass raw cents (integer) to state. MoneyInput handles the /100 display logic.
             setAmount(item.amount || 0); 
         }
     }, [item]);
 
     const handleConfirm = () => {
         // FIX: Convert cents BACK to string dollar format ("15.00") because 
-        // updateExpense expects a string to run Money.toCents() on.
+        // the parent updateExpense function expects a string to run Money.toCents() on.
         const dollarString = (amount / 100).toFixed(2);
         onConfirm(item, dollarString);
         onClose();
@@ -90,8 +90,8 @@ export const DailyAuditModal = ({ isOpen, onClose, accounts, updateAccount, expe
       return expenses.filter(e => {
           if (e.splitConfig?.isOwedOnly) return false; 
           
-          // Case A: Standard Bill/Loan/Sub/Debt that is marked paid but not cleared
-          if (['bill', 'loan', 'subscription', 'debt'].includes(e.type) && e.isPaid && !e.isCleared) return true;
+          // Case A: Standard Bill/Loan/Sub/Debt/Savings that is marked paid but not cleared
+          if (e.isPaid && !e.isCleared) return true;
           
           // Case B: Atomic Debt pending (partial payments from CreditPaymentModal)
           if (e.type === 'debt' && (e.pendingPayment || 0) > 0) return true;
@@ -103,15 +103,11 @@ export const DailyAuditModal = ({ isOpen, onClose, accounts, updateAccount, expe
   const dueItems = useMemo(() => {
       return expenses.filter(e => {
           if (e.splitConfig?.isOwedOnly) return false; 
-          if (['bill', 'loan', 'debt', 'subscription'].includes(e.type)) {
-              if (e.isPaid) return false;
-              // For debts, only show if they have a date set (scheduled payment)
-              if (e.type === 'debt' && !e.date && !e.dueDate) return false; 
-              
-              const d = e.date || e.dueDate || e.nextDate;
-              return d && d <= today;
-          }
-          return false;
+          if (e.isPaid) return false;
+          
+          // Any expense with a date <= today
+          const d = e.date || e.dueDate || e.nextDate;
+          return d && d <= today;
       });
   }, [expenses, today]);
 
@@ -120,43 +116,42 @@ export const DailyAuditModal = ({ isOpen, onClose, accounts, updateAccount, expe
       expenses.forEach(e => {
           if (e.splitConfig?.isOwedOnly) return;
           
-          // UPDATED: Include 'debt' so future debt payments show up
-          if (['bill', 'loan', 'subscription', 'debt'].includes(e.type)) { 
-              let targetDate = e.date || e.dueDate || e.nextDate;
-              let isFutureAllocated = false;
+          let targetDate = e.date || e.dueDate || e.nextDate;
+          if (!targetDate) return;
 
-              // Logic: If it is currently paid (pending clearance), we want to show the NEXT occurrence
-              // as "Upcoming" because funds are likely allocated for it.
-              if (e.isPaid && !e.isCleared) {
-                  const nextD = getNextDateStr(targetDate, e.frequency);
-                  if (nextD > today) {
-                      targetDate = nextD;
-                      isFutureAllocated = true;
-                  } else {
-                      return; 
-                  }
-              } else if (e.isPaid) {
-                  // Fully cleared and paid, wait for next cycle (usually handled by date advance)
-                  return;
-              }
+          let isFutureAllocated = false;
 
-              // Standard Check
-              if (targetDate && targetDate > today) {
-                  // Clone item to override date for display purposes
-                  list.push({ 
-                      ...e, 
-                      date: targetDate, 
-                      dueDate: targetDate,
-                      _isFutureAllocated: isFutureAllocated 
-                  });
+          // Logic: If it is currently paid (pending clearance), we want to show the NEXT occurrence
+          // as "Upcoming" because funds are likely allocated for it.
+          if (e.isPaid && !e.isCleared) {
+              const nextD = getNextDateStr(targetDate, e.frequency);
+              if (nextD > today) {
+                  targetDate = nextD;
+                  isFutureAllocated = true;
+              } else {
+                  return; 
               }
+          } else if (e.isPaid) {
+              // Fully cleared and paid, wait for next cycle
+              return;
+          }
+
+          // Standard Check
+          if (targetDate > today) {
+              list.push({ 
+                  ...e, 
+                  date: targetDate, 
+                  dueDate: targetDate,
+                  _isFutureAllocated: isFutureAllocated 
+              });
           }
       });
       return list.sort((a,b) => (a.date||a.dueDate).localeCompare(b.date||b.dueDate));
   }, [expenses, today]);
 
   const variableWallets = useMemo(() => {
-      return expenses.filter(e => e.type === 'variable' && !e.splitConfig?.isOwedOnly);
+      // Variable items WITHOUT dates go here (pure buckets)
+      return expenses.filter(e => e.type === 'variable' && !e.splitConfig?.isOwedOnly && !e.date && !e.dueDate && !e.nextDate);
   }, [expenses]);
 
   const auditAccounts = useMemo(() => {
@@ -327,7 +322,7 @@ export const DailyAuditModal = ({ isOpen, onClose, accounts, updateAccount, expe
                     </div>
                 )}
 
-                {/* 4. VARIABLE WALLETS */}
+                {/* 4. VARIABLE WALLETS (No Date) */}
                 {variableWallets.length > 0 && (
                     <div>
                         <h4 className="text-xs font-bold text-slate-400 uppercase mb-2 flex items-center gap-2"><Wallet size={14}/> Manage Wallets</h4>
@@ -582,8 +577,8 @@ export const ReservedBreakdownModal = ({ isOpen, onClose, items, accountName, on
                     <h4 className="text-xs font-bold text-amber-500 uppercase mb-2 flex items-center gap-2 sticky top-0 bg-white dark:bg-slate-900 z-10 py-1"><PiggyBank size={14}/> Available / Reserved ({Money.format(totalReserved)})</h4>
                     <div className="space-y-2">
                         {reservedItems.map((item, idx) => {
-                             // UPDATED: Include 'debt' and 'subscription' so "Mark Paid" button appears for them
-                             const isBill = ['bill', 'loan', 'subscription', 'debt'].includes(item.originalType);
+                             // UPDATED: Include ALL types that might be paid
+                             const isPayable = ['bill', 'loan', 'subscription', 'debt'].includes(item.originalType);
                              const isVariable = item.originalType === 'variable';
 
                              return (
@@ -596,7 +591,7 @@ export const ReservedBreakdownModal = ({ isOpen, onClose, items, accountName, on
                                         <div className="flex items-center gap-3">
                                             <span className="font-mono font-bold text-amber-600 dark:text-amber-400">{Money.format(item.amount)}</span>
                                             
-                                            {isBill && (
+                                            {isPayable && (
                                                 <button onClick={() => setAdjustItem(item)} className="p-2 bg-emerald-100 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400 rounded-lg hover:bg-emerald-200 dark:hover:bg-emerald-800 transition-colors" title="Mark Paid">
                                                     <Check size={16}/>
                                                 </button>
