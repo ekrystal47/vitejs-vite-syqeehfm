@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   X, Check, Calendar, Repeat, DollarSign, Tag, User, CreditCard, 
   Wallet, PiggyBank, TrendingUp, Landmark, ShieldCheck, RefreshCw, 
-  ChevronDown, ArrowRight, Target, Infinity, Building2, Zap, Link as LinkIcon 
+  ChevronDown, ArrowRight, Target, Infinity, Building2, Zap, Link as LinkIcon, Lock, Layers, ListOrdered 
 } from 'lucide-react';
 import { Money, calculateIdealBalance, getTodayStr, getPreviousDateStr } from '../../lib/finance';
 
@@ -88,7 +88,7 @@ const FrequencySelect = ({value, onChange}) => (
 
 // --- MAIN MODAL COMPONENT ---
 
-const UnifiedEntryModal = ({ isOpen, onClose, onSave, accounts, initialData, incomes, type: initialType, context, partners = [] }) => {
+const UnifiedEntryModal = ({ isOpen, onClose, onSave, accounts, expenses, initialData, incomes, type: initialType, context, partners = [] }) => {
   const [mode, setMode] = useState('start');
   const [formData, setFormData] = useState({});
   const [userEditedBalance, setUserEditedBalance] = useState(false);
@@ -100,15 +100,17 @@ const UnifiedEntryModal = ({ isOpen, onClose, onSave, accounts, initialData, inc
   const [isSplit, setIsSplit] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [expenseType, setExpenseType] = useState('bill'); 
+  const [fundSourceMode, setFundSourceMode] = useState('account'); // 'account' or 'bucket'
 
-  // Savings Toggle
+  // Savings Toggles
   const [savingsType, setSavingsType] = useState('goal'); 
+  const [isAutoTracked, setIsAutoTracked] = useState(false);
 
   // Account Automation Toggles
   const [showAutoConfig, setShowAutoConfig] = useState(false);
 
   useEffect(() => {
-    if (expenseType === 'bill') {
+    if (expenseType === 'bill' || expenseType === 'bnpl') {
       setIsFixed(true);
       setIsRollover(false);
     } else {
@@ -130,22 +132,26 @@ const UnifiedEntryModal = ({ isOpen, onClose, onSave, accounts, initialData, inc
           if (initData.autoConfig) setShowAutoConfig(true);
         }
         
-        // Ensure linkedAccountIds exists
         if (!initData.linkedAccountIds) initData.linkedAccountIds = [];
+        if (initData.linkedAccountIds.length > 0) setIsAutoTracked(true);
+        else setIsAutoTracked(false);
+
+        // Determine Fund Source Mode
+        if (initData.parentExpenseId) setFundSourceMode('bucket');
+        else setFundSourceMode('account');
 
         setFormData(initData);
 
-        // Restore Settings
         if (initData.splitConfig) { setIsSplit(true); }
         
         if (initData.type === 'variable') { setExpenseType('bucket'); setSpecialType(''); }
         else if (initData.type === 'bill') { setExpenseType('bill'); setSpecialType(''); }
+        else if (initData.type === 'bnpl') { setExpenseType('bnpl'); setSpecialType(''); } // Existing BNPL
         else if (initData.type === 'debt') { setSpecialType('debt'); setShowAdvanced(true); setExpenseType('bill'); }
         
         if (initData.savingsType) setSavingsType(initData.savingsType);
         else setSavingsType('goal');
 
-        // Set Mode
         if (initialData.type === 'income') setMode('income');
         else if (context === 'account' || ['checking','credit','investment','loan'].includes(initialData.type) || (initialData.type === 'savings' && !initData.isGoal)) {
           setMode('account');
@@ -164,8 +170,9 @@ const UnifiedEntryModal = ({ isOpen, onClose, onSave, accounts, initialData, inc
         setShowAdvanced(false);
         setShowAutoConfig(false);
         setSpecialType('');
+        setIsAutoTracked(false);
+        setFundSourceMode('account');
 
-        // Normalize Mode
         if (initialType === 'income') setMode('income');
         else if (initialType === 'account') setMode('account');
         else if (initialType === 'savings') setMode('savings');
@@ -190,14 +197,15 @@ const UnifiedEntryModal = ({ isOpen, onClose, onSave, accounts, initialData, inc
           splitConfig: { isSplit: false, partnerId: '', partnerAmount: 0, payer: 'me', isOwedOnly: false },
           autoConfig: { isAuto: false, amount: 0, frequency: 'Monthly' }, 
           retirementType: 'none', isPreTax: false,
-          linkedAccountIds: [] 
+          linkedAccountIds: [],
+          totalInstallments: 4, installmentsPaid: 0, // BNPL Defaults
+          parentExpenseId: '' // Linked Bucket
         });
       }
       setUserEditedBalance(false);
     }
   }, [isOpen, initialData, accounts, initialType, context]);
 
-  // --- SMART LOGIC ---
   const idealData = useMemo(() => {
     if (mode !== 'expense' && mode !== 'savings') return { amount: 0 };
     
@@ -221,7 +229,6 @@ const UnifiedEntryModal = ({ isOpen, onClose, onSave, accounts, initialData, inc
     }
   }, [idealData, isOpen, initialData, userEditedBalance, formData.currentBalance, mode]);
 
-  // FIX: Moved useMemo for linkedTotal UP here, BEFORE the early return
   const linkedTotal = useMemo(() => {
       if (!formData.linkedAccountIds || formData.linkedAccountIds.length === 0) return 0;
       return formData.linkedAccountIds.reduce((sum, id) => {
@@ -230,7 +237,6 @@ const UnifiedEntryModal = ({ isOpen, onClose, onSave, accounts, initialData, inc
       }, 0);
   }, [formData.linkedAccountIds, accounts]);
 
-  // NOW we can check for return
   if (!isOpen) return null;
 
   const handleChange = (field, value) => {
@@ -283,16 +289,27 @@ const UnifiedEntryModal = ({ isOpen, onClose, onSave, accounts, initialData, inc
     else if (mode === 'savings') finalType = 'savings';
     else {
       if (specialType === 'debt') finalType = 'debt';
+      else if (expenseType === 'bnpl') finalType = 'bnpl'; // New BNPL Type
       else if (expenseType === 'bill') finalType = 'bill'; 
       else finalType = 'variable'; 
     }
 
     let finalData = { ...formData };
 
+    // Clean up Bucket linking
+    if (fundSourceMode === 'account') {
+        finalData.parentExpenseId = ''; // Clear parent link if switched to account
+    } else {
+        finalData.accountId = ''; // Clear account ID if switched to bucket
+    }
+
     if (mode === 'savings') {
         finalData.savingsType = savingsType; 
         if (savingsType === 'revolving') {
             finalData.targetBalance = 0; 
+        }
+        if (!isAutoTracked) {
+            finalData.linkedAccountIds = [];
         }
     }
 
@@ -304,12 +321,12 @@ const UnifiedEntryModal = ({ isOpen, onClose, onSave, accounts, initialData, inc
       finalData.type = finalData.accountType.toLowerCase();
     }
 
-    if (initialData && mode === 'expense' && initialData.type === 'bill' && specialType !== 'debt') {
+    // Fix type override for edits
+    if (initialData && mode === 'expense' && initialData.type === 'bill' && specialType !== 'debt' && expenseType !== 'bnpl') {
         finalType = 'bill';
     }
 
-    // Smart Fill for New Items
-    if (!initialData && !userEditedBalance && ['bill','variable','savings','debt'].includes(finalType)) {
+    if (!initialData && !userEditedBalance && ['bill','variable','savings','debt','bnpl'].includes(finalType)) {
       const primaryIncome = incomes?.find(i => i.isPrimary) || incomes?.[0];
       if (primaryIncome && finalData.amount) {
          if (!finalData.date && !finalData.dueDate) finalData.date = getTodayStr();
@@ -329,6 +346,7 @@ const UnifiedEntryModal = ({ isOpen, onClose, onSave, accounts, initialData, inc
 
   // --- RENDER: START SCREEN ---
   if (mode === 'start') {
+    // ... (Same as before)
     return (
       <div className="fixed inset-0 z-[130] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in">
         <div className="bg-white dark:bg-slate-900 w-full max-w-2xl rounded-3xl shadow-2xl p-8 border border-slate-200 dark:border-slate-800">
@@ -382,9 +400,10 @@ const UnifiedEntryModal = ({ isOpen, onClose, onSave, accounts, initialData, inc
             <input className="w-full p-3 bg-slate-50 dark:bg-slate-900 dark:text-white border border-slate-200 dark:border-slate-700 rounded-xl font-bold outline-none" placeholder="e.g. Rent, Groceries, Paycheck" value={formData.name || ''} onChange={e => handleChange('name', e.target.value)}/>
           </div>
 
-          {/* === SAVINGS MODE (Updated with Split & Tags) === */}
+          {/* === SAVINGS MODE === */}
           {mode === 'savings' && (
-            <>
+             // ... (Keep existing Savings JSX from previous turn - it is correct)
+             <>
               <div className="flex bg-slate-100 dark:bg-slate-800 p-1 rounded-xl mb-4">
                  <button onClick={() => setSavingsType('goal')} className={`flex-1 py-2 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-2 ${savingsType === 'goal' ? 'bg-white dark:bg-slate-700 shadow-sm text-purple-700 dark:text-white' : 'text-slate-500 hover:text-slate-700 dark:hover:text-slate-300'}`}>
                     <Target size={14} /> Target Goal
@@ -394,7 +413,7 @@ const UnifiedEntryModal = ({ isOpen, onClose, onSave, accounts, initialData, inc
                  </button>
               </div>
 
-              {/* NEW TAX & RETIREMENT TAGGING */}
+              {/* RETIREMENT TAGS */}
               <div className="bg-emerald-50 dark:bg-emerald-900/10 p-3 rounded-xl border border-emerald-100 dark:border-emerald-900/50 mb-4">
                   <div className="grid grid-cols-2 gap-4">
                       <div>
@@ -417,75 +436,25 @@ const UnifiedEntryModal = ({ isOpen, onClose, onSave, accounts, initialData, inc
                   </div>
               </div>
 
+              {/* CONTRIBUTION DETAILS (Always Visible) */}
               <div className="grid grid-cols-2 gap-4">
-                <div><label className="text-[10px] font-bold text-slate-400 uppercase mb-1 block">Contribution</label><MoneyInput value={formData.amount} onChange={e => handleChange('amount', e)} /></div>
+                <div><label className="text-[10px] font-bold text-slate-400 uppercase mb-1 block">Monthly Contribution</label><MoneyInput value={formData.amount} onChange={e => handleChange('amount', e)} /></div>
                 <div><label className="text-[10px] font-bold text-slate-400 uppercase mb-1 block">Frequency</label><FrequencySelect value={formData.frequency} onChange={e => handleChange('frequency', e.target.value)} /></div>
               </div>
-
-              {/* SAVINGS SPLIT */}
-              <div className="bg-purple-50 dark:bg-purple-900/10 p-3 rounded-xl border border-purple-100 dark:border-purple-900/50">
-                 <div className="flex justify-between items-center">
-                   <div><div className="font-bold text-slate-700 dark:text-slate-300 text-sm">Split this contribution?</div><div className="text-[10px] text-slate-400">Share goal with partner.</div></div>
-                   <ToggleSwitch checked={isSplit} onChange={setIsSplit} />
-                 </div>
-                 {isSplit && (
-                   <div className="animate-in slide-in-from-top-2 space-y-3 mt-3 pt-3 border-t border-purple-200 dark:border-purple-800/50">
-                     <div className="flex justify-between items-center mb-2">
-                       <div>
-                         <div className="font-bold text-purple-700 dark:text-purple-300 text-xs">Track Owed Amount Only?</div>
-                         <div className="text-[9px] text-purple-500">Just track the debt, don't budget.</div>
-                       </div>
-                       <ToggleSwitch checked={formData.splitConfig?.isOwedOnly || false} onChange={v => handleSplitChange('isOwedOnly', v)} />
-                     </div>
-                     <div className="grid grid-cols-2 gap-2">
-                        <div>
-                          <label className="text-[9px] font-bold text-purple-700 dark:text-purple-300 uppercase mb-1 block">Select Partner</label>
-                          <select className="w-full p-2 bg-white dark:bg-slate-800 dark:text-white border border-purple-200 dark:border-purple-700 rounded-lg text-xs font-bold outline-none" value={formData.splitConfig?.partnerId || ''} onChange={e => handleSplitChange('partnerId', e.target.value)}>
-                            <option value="">Choose...</option>
-                            {(partners || []).map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-                          </select>
-                        </div>
-                        <div>
-                          <label className="text-[9px] font-bold text-purple-700 dark:text-purple-300 uppercase mb-1 block">Who Contributes?</label>
-                          <div className="flex bg-white dark:bg-slate-800 rounded-lg border border-purple-200 dark:border-purple-700 overflow-hidden">
-                            <button onClick={() => handleSplitChange('payer', 'me')} className={`flex-1 py-2 text-xs font-bold ${formData.splitConfig?.payer === 'me' ? 'bg-purple-600 text-white' : 'text-slate-500'}`}>Me</button>
-                            <button onClick={() => handleSplitChange('payer', 'partner')} className={`flex-1 py-2 text-xs font-bold ${formData.splitConfig?.payer === 'partner' ? 'bg-purple-600 text-white' : 'text-slate-500'}`}>Partner</button>
-                          </div>
-                        </div>
-                     </div>
-                     <div>
-                        <label className="text-[9px] font-bold text-purple-700 dark:text-purple-300 uppercase mb-1 block">Partner's Portion</label>
-                        <MoneyInput value={formData.splitConfig?.partnerAmount || 0} onChange={v => handleSplitChange('partnerAmount', v)} />
-                        <div className="text-[10px] text-purple-600 dark:text-purple-300 mt-1 text-right">
-                          You contribute: <strong>{Money.format((formData.amount || 0) - (formData.splitConfig?.partnerAmount || 0))}</strong>
-                        </div>
-                     </div>
-                   </div>
-                 )}
-               </div>
               
               {!isOwedOnly && (
                 <>
-                  <div><label className="text-[10px] font-bold text-slate-400 uppercase mb-1 block">Next Contribution Date</label><DateInput value={formData.date || formData.nextDate} onChange={e => handleChange('date', e.target.value)} label="" /></div>
-                  
-                  {/* MULTI-ACCOUNT LINKING */}
-                  <div className="mt-4">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase mb-2 flex items-center gap-2"><LinkIcon size={12}/> Link Accounts (Auto-Track Progress)</label>
-                      <div className="max-h-32 overflow-y-auto custom-scrollbar p-2 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl space-y-2">
-                          {(accounts.filter(a => ['checking','savings','investment'].includes(a.type))||[]).map(a => {
-                              const isSelected = (formData.linkedAccountIds || []).includes(a.id);
-                              return (
-                                  <div 
-                                    key={a.id} 
-                                    onClick={() => toggleLinkedAccount(a.id)}
-                                    className={`flex items-center justify-between p-2 rounded-lg cursor-pointer transition-colors border ${isSelected ? 'bg-indigo-50 border-indigo-200 dark:bg-indigo-900/30 dark:border-indigo-700' : 'bg-white border-transparent hover:bg-slate-100 dark:bg-slate-800 dark:hover:bg-slate-700'}`}
-                                  >
-                                      <div className="text-xs font-bold text-slate-700 dark:text-slate-300">{a.name}</div>
-                                      {isSelected && <Check size={14} className="text-indigo-600 dark:text-indigo-400" />}
-                                  </div>
-                              );
-                          })}
-                          {accounts.length === 0 && <div className="text-[10px] text-slate-400 text-center">No accounts available to link.</div>}
+                  <div className="grid grid-cols-2 gap-4 mt-4">
+                      {/* DESTINATION ACCOUNT (Always Required) */}
+                      <div>
+                          <label className="text-[10px] font-bold text-slate-400 uppercase mb-1 block">Deposit To (Account)</label>
+                          <select className="w-full p-3 bg-slate-50 dark:bg-slate-900 dark:text-white border border-slate-200 dark:border-slate-700 rounded-xl text-sm font-bold outline-none" value={formData.accountId || ''} onChange={e => handleChange('accountId', e.target.value)}>
+                              {(accounts.filter(a => ['checking','savings','investment'].includes(a.type))||[]).map(a => <option key={a.id} value={a.id}>{a.name} ({a.type})</option>)}
+                          </select>
+                      </div>
+                      <div>
+                          <label className="text-[10px] font-bold text-slate-400 uppercase mb-1 block">Next Contribution Date</label>
+                          <DateInput value={formData.date || formData.nextDate} onChange={e => handleChange('date', e.target.value)} label="" />
                       </div>
                   </div>
 
@@ -493,22 +462,57 @@ const UnifiedEntryModal = ({ isOpen, onClose, onSave, accounts, initialData, inc
                         <div className="mt-4"><label className="text-[10px] font-bold text-slate-400 uppercase mb-1 block">Target Goal (Total)</label><MoneyInput value={formData.targetBalance} onChange={e => handleChange('targetBalance', e)} /></div>
                   )}
                   
+                  {/* PROGRESS TRACKING TOGGLE */}
+                  <div className="mt-6 pt-4 border-t border-slate-100 dark:border-slate-700">
+                      <div className="flex justify-between items-center mb-2">
+                         <div className="text-xs font-bold text-slate-600 dark:text-slate-300 flex items-center gap-2">
+                            {isAutoTracked ? <LinkIcon size={14} className="text-blue-500"/> : <Lock size={14} className="text-slate-400"/>} 
+                            Progress Tracking
+                         </div>
+                         <div className="flex items-center gap-2">
+                             <span className="text-[10px] font-bold text-slate-400 uppercase">Auto-Calculate?</span>
+                             <ToggleSwitch checked={isAutoTracked} onChange={setIsAutoTracked} />
+                         </div>
+                      </div>
+
+                      {/* CONDITIONAL RENDER: MANUAL vs AUTO */}
+                      {isAutoTracked ? (
+                          <div className="max-h-32 overflow-y-auto custom-scrollbar p-2 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl space-y-2">
+                              {(accounts.filter(a => ['checking','savings','investment'].includes(a.type))||[]).map(a => {
+                                  const isSelected = (formData.linkedAccountIds || []).includes(a.id);
+                                  return (
+                                      <div 
+                                        key={a.id} 
+                                        onClick={() => toggleLinkedAccount(a.id)}
+                                        className={`flex items-center justify-between p-2 rounded-lg cursor-pointer transition-colors border ${isSelected ? 'bg-indigo-50 border-indigo-200 dark:bg-indigo-900/30 dark:border-indigo-700' : 'bg-white border-transparent hover:bg-slate-100 dark:bg-slate-800 dark:hover:bg-slate-700'}`}
+                                      >
+                                          <div className="text-xs font-bold text-slate-700 dark:text-slate-300">{a.name}</div>
+                                          {isSelected && <Check size={14} className="text-indigo-600 dark:text-indigo-400" />}
+                                      </div>
+                                  );
+                              })}
+                              {accounts.length === 0 && <div className="text-[10px] text-slate-400 text-center">No accounts available to link.</div>}
+                          </div>
+                      ) : (
+                          // Manual Input (Fallback if not tracking automatically)
+                          <div className="bg-slate-50 dark:bg-slate-800/50 p-2 rounded-xl border border-slate-200 dark:border-slate-700">
+                             <MoneyInput value={formData.currentBalance} onChange={(e) => handleChange('currentBalance', e)} />
+                          </div>
+                      )}
+                  </div>
+                  
+                  {/* SUMMARY BOX */}
                   <div className="bg-purple-50 dark:bg-purple-900/20 p-4 rounded-xl border border-purple-100 dark:border-purple-800 space-y-2 mt-4">
                     <div className="flex justify-between items-center">
-                        <label className="text-[10px] font-bold text-purple-800 dark:text-purple-300 uppercase">
-                            {(formData.linkedAccountIds && formData.linkedAccountIds.length > 0) ? "Total Tracked (Auto)" : "Already Saved (Manual)"}
-                        </label>
+                        <label className="text-[10px] font-bold text-purple-800 dark:text-purple-300 uppercase">Current Progress</label>
+                        <span className="font-bold text-purple-700 dark:text-purple-300">
+                            {Money.format(isAutoTracked ? linkedTotal : (formData.currentBalance || 0))}
+                        </span>
                     </div>
-                    {/* If linked, disable input and show total. If not, enable input. */}
-                    <MoneyInput 
-                        value={(formData.linkedAccountIds && formData.linkedAccountIds.length > 0) ? linkedTotal : formData.currentBalance} 
-                        onChange={(e) => handleChange('currentBalance', e)} 
-                        disabled={formData.linkedAccountIds && formData.linkedAccountIds.length > 0}
-                    />
                     <p className="text-[10px] text-purple-600 dark:text-purple-400 italic">
-                        {formData.linkedAccountIds?.length > 0 
-                             ? `Automatically summing ${formData.linkedAccountIds.length} linked account(s).` 
-                             : (savingsType === 'goal' ? 'Progress towards your target.' : 'Existing funds in this bucket.')
+                        {isAutoTracked
+                             ? `Sum of ${formData.linkedAccountIds?.length || 0} linked account(s).` 
+                             : 'Manually entered balance.'
                         }
                     </p>
                   </div>
@@ -517,72 +521,78 @@ const UnifiedEntryModal = ({ isOpen, onClose, onSave, accounts, initialData, inc
             </>
           )}
 
-          {/* === EXPENSE MODE === */}
+          {/* === EXPENSE MODE (Updated with BNPL & Linked) === */}
           {mode === 'expense' && (
              <>
                <div className="flex bg-slate-100 dark:bg-slate-800 p-1 rounded-xl">
-                 <button onClick={() => setExpenseType('bill')} className={`flex-1 py-2 rounded-lg text-xs font-bold transition-all ${expenseType === 'bill' ? 'bg-white dark:bg-slate-700 shadow-sm text-slate-900 dark:text-white' : 'text-slate-500 hover:text-slate-700 dark:hover:text-slate-300'}`}>Fixed Bill</button>
-                 <button onClick={() => setExpenseType('bucket')} className={`flex-1 py-2 rounded-lg text-xs font-bold transition-all ${expenseType === 'bucket' ? 'bg-white dark:bg-slate-700 shadow-sm text-slate-900 dark:text-white' : 'text-slate-500 hover:text-slate-700 dark:hover:text-slate-300'}`}>Flexible Bucket</button>
+                 <button onClick={() => setExpenseType('bill')} className={`flex-1 py-2 rounded-lg text-xs font-bold transition-all ${expenseType === 'bill' ? 'bg-white dark:bg-slate-700 shadow-sm text-slate-900 dark:text-white' : 'text-slate-500 hover:text-slate-700 dark:hover:text-slate-300'}`}>Bill</button>
+                 <button onClick={() => setExpenseType('bucket')} className={`flex-1 py-2 rounded-lg text-xs font-bold transition-all ${expenseType === 'bucket' ? 'bg-white dark:bg-slate-700 shadow-sm text-slate-900 dark:text-white' : 'text-slate-500 hover:text-slate-700 dark:hover:text-slate-300'}`}>Bucket</button>
+                 <button onClick={() => setExpenseType('bnpl')} className={`flex-1 py-2 rounded-lg text-xs font-bold transition-all ${expenseType === 'bnpl' ? 'bg-white dark:bg-slate-700 shadow-sm text-slate-900 dark:text-white' : 'text-slate-500 hover:text-slate-700 dark:hover:text-slate-300'}`}>Split Pay</button>
                </div>
-               <div className="grid grid-cols-2 gap-4">
-                 <div><label className="text-[10px] font-bold text-slate-400 uppercase mb-1 block">{specialType === 'debt' ? "Payment Amount" : "Budget Amount"}</label><MoneyInput value={formData.amount} onChange={e => handleChange('amount', e)} /></div>
+               
+               {/* BNPL CONFIG */}
+               {expenseType === 'bnpl' && (
+                   <div className="grid grid-cols-2 gap-4 mt-2 p-3 bg-blue-50 dark:bg-blue-900/10 rounded-xl border border-blue-100 dark:border-blue-900/50">
+                       <div><label className="text-[10px] font-bold text-blue-700 dark:text-blue-300 uppercase mb-1 block">Installments</label><input type="number" className="w-full p-2 rounded-lg font-bold border outline-none dark:bg-slate-800 dark:text-white dark:border-slate-600" value={formData.totalInstallments} onChange={e => handleChange('totalInstallments', parseInt(e.target.value))}/></div>
+                       <div><label className="text-[10px] font-bold text-blue-700 dark:text-blue-300 uppercase mb-1 block">Paid So Far</label><input type="number" className="w-full p-2 rounded-lg font-bold border outline-none dark:bg-slate-800 dark:text-white dark:border-slate-600" value={formData.installmentsPaid} onChange={e => handleChange('installmentsPaid', parseInt(e.target.value))}/></div>
+                   </div>
+               )}
+
+               <div className="grid grid-cols-2 gap-4 mt-4">
+                 <div><label className="text-[10px] font-bold text-slate-400 uppercase mb-1 block">{specialType === 'debt' ? "Payment Amount" : (expenseType === 'bnpl' ? "Payment / Installment" : "Budget Amount")}</label><MoneyInput value={formData.amount} onChange={e => handleChange('amount', e)} /></div>
                  <div><label className="text-[10px] font-bold text-slate-400 uppercase mb-1 block">Frequency</label><FrequencySelect value={formData.frequency} onChange={e => handleChange('frequency', e.target.value)} /></div>
                </div>
-
-               <div className="bg-blue-50 dark:bg-blue-900/10 p-3 rounded-xl border border-blue-100 dark:border-blue-900/50">
-                 <div className="flex justify-between items-center">
-                   <div><div className="font-bold text-slate-700 dark:text-slate-300 text-sm">Split this expense?</div><div className="text-[10px] text-slate-400">Share cost with partner.</div></div>
-                   <ToggleSwitch checked={isSplit} onChange={setIsSplit} />
-                 </div>
-                 {isSplit && (
-                   <div className="animate-in slide-in-from-top-2 space-y-3 mt-3 pt-3 border-t border-blue-200 dark:border-blue-800/50">
-                     <div className="flex justify-between items-center mb-2">
-                       <div>
-                         <div className="font-bold text-blue-700 dark:text-blue-300 text-xs">Track Owed Amount Only?</div>
-                         <div className="text-[9px] text-blue-500">Don't budget for this, just track debt.</div>
-                       </div>
-                       <ToggleSwitch checked={formData.splitConfig?.isOwedOnly || false} onChange={v => handleSplitChange('isOwedOnly', v)} />
-                     </div>
-                     <div className="grid grid-cols-2 gap-2">
-                        <div>
-                          <label className="text-[9px] font-bold text-blue-700 dark:text-blue-300 uppercase mb-1 block">Select Partner</label>
-                          <select className="w-full p-2 bg-white dark:bg-slate-800 dark:text-white border border-blue-200 dark:border-blue-700 rounded-lg text-xs font-bold outline-none" value={formData.splitConfig?.partnerId || ''} onChange={e => handleSplitChange('partnerId', e.target.value)}>
-                            <option value="">Choose...</option>
-                            {(partners || []).map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-                          </select>
-                        </div>
-                        <div>
-                          <label className="text-[9px] font-bold text-blue-700 dark:text-blue-300 uppercase mb-1 block">Who Pays This?</label>
-                          <div className="flex bg-white dark:bg-slate-800 rounded-lg border border-blue-200 dark:border-blue-700 overflow-hidden">
-                            <button onClick={() => handleSplitChange('payer', 'me')} className={`flex-1 py-2 text-xs font-bold ${formData.splitConfig?.payer === 'me' ? 'bg-blue-600 text-white' : 'text-slate-500'}`}>Me</button>
-                            <button onClick={() => handleSplitChange('payer', 'partner')} className={`flex-1 py-2 text-xs font-bold ${formData.splitConfig?.payer === 'partner' ? 'bg-blue-600 text-white' : 'text-slate-500'}`}>Partner</button>
-                          </div>
-                        </div>
-                     </div>
-                     <div>
-                        <label className="text-[9px] font-bold text-blue-700 dark:text-blue-300 uppercase mb-1 block">Partner Pays (Amount)</label>
-                        <MoneyInput value={formData.splitConfig?.partnerAmount || 0} onChange={v => handleSplitChange('partnerAmount', v)} />
-                        <div className="text-[10px] text-blue-600 dark:text-blue-300 mt-1 text-right">
-                          You pay: <strong>{Money.format((formData.amount || 0) - (formData.splitConfig?.partnerAmount || 0))}</strong>
-                        </div>
-                     </div>
+               
+               {/* FUND SOURCE: ACCOUNT vs BUCKET */}
+               <div className="flex items-center justify-between mt-4 mb-2">
+                   <label className="text-[10px] font-bold text-slate-400 uppercase">Fund Source</label>
+                   <div className="flex bg-slate-100 dark:bg-slate-800 rounded-lg p-0.5">
+                       <button onClick={() => setFundSourceMode('account')} className={`px-3 py-1 text-[10px] font-bold rounded-md ${fundSourceMode === 'account' ? 'bg-white shadow-sm text-slate-800' : 'text-slate-400'}`}>Account</button>
+                       <button onClick={() => setFundSourceMode('bucket')} className={`px-3 py-1 text-[10px] font-bold rounded-md ${fundSourceMode === 'bucket' ? 'bg-white shadow-sm text-slate-800' : 'text-slate-400'}`}>Bucket</button>
                    </div>
-                 )}
                </div>
 
                {!isOwedOnly && (
                  <>
                    <div className="grid grid-cols-2 gap-4 animate-in fade-in">
-                      <div><label className="text-[10px] font-bold text-slate-400 uppercase mb-1 block">Paid From</label><select className="w-full p-3 bg-slate-50 dark:bg-slate-900 dark:text-white border border-slate-200 dark:border-slate-700 rounded-xl text-sm font-bold outline-none" value={formData.accountId || ''} onChange={e => handleChange('accountId', e.target.value)}>{(accounts.filter(a => ['checking','savings','credit'].includes(a.type))||[]).map(a => <option key={a.id} value={a.id}>{a.name} ({a.type})</option>)}</select></div>
-                      <div><label className="text-[10px] font-bold text-slate-400 uppercase mb-1 block">{isFixed ? 'Next Due Date' : 'Next Target / Due Date'}</label><DateInput value={formData.date || formData.dueDate} onChange={e => { handleChange('date', e.target.value); handleChange('dueDate', e.target.value); }} /></div>
+                      {fundSourceMode === 'account' ? (
+                          <div>
+                              <select className="w-full p-3 bg-slate-50 dark:bg-slate-900 dark:text-white border border-slate-200 dark:border-slate-700 rounded-xl text-sm font-bold outline-none" value={formData.accountId || ''} onChange={e => handleChange('accountId', e.target.value)}>
+                                  <option value="">Select Account...</option>
+                                  {(accounts.filter(a => ['checking','savings','credit'].includes(a.type))||[]).map(a => <option key={a.id} value={a.id}>{a.name} ({a.type})</option>)}
+                              </select>
+                          </div>
+                      ) : (
+                          <div>
+                              <select className="w-full p-3 bg-slate-50 dark:bg-slate-900 dark:text-white border border-slate-200 dark:border-slate-700 rounded-xl text-sm font-bold outline-none" value={formData.parentExpenseId || ''} onChange={e => handleChange('parentExpenseId', e.target.value)}>
+                                  <option value="">Select Parent Bucket...</option>
+                                  {(expenses.filter(e => e.type === 'variable' && e.id !== formData.id)||[]).map(e => <option key={e.id} value={e.id}>{e.name} (Rem: {Money.format(e.currentBalance)})</option>)}
+                              </select>
+                          </div>
+                      )}
+                      
+                      <div><DateInput value={formData.date || formData.dueDate} onChange={e => { handleChange('date', e.target.value); handleChange('dueDate', e.target.value); }} /></div>
                    </div>
-                   <div className="bg-purple-50 dark:bg-purple-900/20 p-4 rounded-xl border border-purple-100 dark:border-purple-800 space-y-2 mt-2 animate-in fade-in">
-                      <div className="flex justify-between items-center"><label className="text-[10px] font-bold text-purple-800 dark:text-purple-300 uppercase">Start Balance (Already allocated?)</label></div>
-                      <MoneyInput value={formData.currentBalance} onChange={(e) => handleChange('currentBalance', e)} />
-                   </div>
+                   
+                   {/* If bucket funded, visual confirmation */}
+                   {fundSourceMode === 'bucket' && formData.parentExpenseId && (
+                       <div className="mt-2 p-3 bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 rounded-xl text-xs text-blue-700 dark:text-blue-300 flex items-center gap-2">
+                           <Layers size={14}/>
+                           This expense will auto-deduct from <strong>{expenses.find(e => e.id === formData.parentExpenseId)?.name}</strong> when paid.
+                       </div>
+                   )}
+
+                   {/* Standard Balance Field */}
+                   {(expenseType !== 'bnpl' && fundSourceMode !== 'bucket') && (
+                       <div className="bg-purple-50 dark:bg-purple-900/20 p-4 rounded-xl border border-purple-100 dark:border-purple-800 space-y-2 mt-2 animate-in fade-in">
+                          <div className="flex justify-between items-center"><label className="text-[10px] font-bold text-purple-800 dark:text-purple-300 uppercase">Start Balance</label></div>
+                          <MoneyInput value={formData.currentBalance} onChange={(e) => handleChange('currentBalance', e)} />
+                       </div>
+                   )}
                  </>
                )}
 
+               {/* Advanced Toggle */}
                <div className="pt-2">
                  <button onClick={() => setShowAdvanced(!showAdvanced)} className="flex items-center gap-2 text-xs font-bold text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-white transition-colors">
                    {showAdvanced ? <ChevronDown size={14}/> : <ArrowRight size={14}/>} Advanced Settings
@@ -590,26 +600,66 @@ const UnifiedEntryModal = ({ isOpen, onClose, onSave, accounts, initialData, inc
                </div>
                {showAdvanced && (
                  <div className="bg-slate-50 dark:bg-slate-800 p-4 rounded-xl border border-slate-200 dark:border-slate-700 space-y-4 mt-2 animate-in slide-in-from-top-2">
+                    {/* ... (Debt link logic same as before) ... */}
                     <div className="flex justify-between items-center">
                       <div><div className="font-bold text-slate-700 dark:text-slate-300 text-sm">Link to Debt?</div><div className="text-[10px] text-slate-400">Pay off a loan/card.</div></div>
                       <select className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-600 rounded-lg text-sm font-bold p-2 outline-none dark:text-white" value={specialType} onChange={e => setSpecialType(e.target.value)}><option value="">No, just spending</option><option value="debt">Debt Payment</option></select>
                     </div>
-
                     {specialType === 'debt' && (
                       <div className="animate-in slide-in-from-top-2 pt-2 border-t border-slate-200 dark:border-slate-700">
                         <label className="text-[10px] font-bold text-orange-600 dark:text-orange-400 uppercase mb-1 block">Which Debt Account?</label>
                         <select className="w-full p-3 bg-white dark:bg-slate-900 dark:text-white border border-orange-200 dark:border-slate-600 rounded-xl text-sm font-bold outline-none" value={formData.totalDebtBalance} onChange={e => handleChange('totalDebtBalance', e.target.value)}><option value="">Select Loan/Card...</option>{accounts.filter(a => a.type === 'loan' || a.type === 'credit').map(a => <option key={a.id} value={a.id}>{a.name} (Bal: {Money.format(a.currentBalance)})</option>)}</select>
                       </div>
                     )}
-                    <div className="flex gap-2 mt-2 pt-2 border-t border-slate-200 dark:border-slate-700">
-                      <button onClick={() => handleChange('isEssential', !formData.isEssential)} className={`flex-1 py-3 px-2 rounded-xl border flex items-center justify-center gap-2 transition-all ${formData.isEssential ? 'bg-indigo-100 border-indigo-200 text-indigo-700' : 'bg-white border-slate-200 text-slate-400'}`}><ShieldCheck size={16}/> <span className="text-xs font-bold">Essential</span></button>
-                      <button onClick={() => handleChange('isSubscription', !formData.isSubscription)} className={`flex-1 py-3 px-2 rounded-xl border flex items-center justify-center gap-2 transition-all ${formData.isSubscription ? 'bg-orange-100 border-orange-200 text-orange-700' : 'bg-white border-slate-200 text-slate-400'}`}><RefreshCw size={16}/> <span className="text-xs font-bold">Subscription</span></button>
+                    
+                    {/* Split Logic (Partner) */}
+                    <div className="bg-blue-50 dark:bg-blue-900/10 p-3 rounded-xl border border-blue-100 dark:border-blue-900/50">
+                        <div className="flex justify-between items-center">
+                            <div><div className="font-bold text-slate-700 dark:text-slate-300 text-sm">Split this expense?</div><div className="text-[10px] text-slate-400">Share cost with partner.</div></div>
+                            <ToggleSwitch checked={isSplit} onChange={setIsSplit} />
+                        </div>
+                        {isSplit && (
+                            <div className="animate-in slide-in-from-top-2 space-y-3 mt-3 pt-3 border-t border-blue-200 dark:border-blue-800/50">
+                                {/* ... Same Partner Split UI as before ... */}
+                                <div className="flex justify-between items-center mb-2">
+                                <div>
+                                    <div className="font-bold text-blue-700 dark:text-blue-300 text-xs">Track Owed Amount Only?</div>
+                                    <div className="text-[9px] text-blue-500">Don't budget for this, just track debt.</div>
+                                </div>
+                                <ToggleSwitch checked={formData.splitConfig?.isOwedOnly || false} onChange={v => handleSplitChange('isOwedOnly', v)} />
+                                </div>
+                                <div className="grid grid-cols-2 gap-2">
+                                    <div>
+                                    <label className="text-[9px] font-bold text-blue-700 dark:text-blue-300 uppercase mb-1 block">Select Partner</label>
+                                    <select className="w-full p-2 bg-white dark:bg-slate-800 dark:text-white border border-blue-200 dark:border-blue-700 rounded-lg text-xs font-bold outline-none" value={formData.splitConfig?.partnerId || ''} onChange={e => handleSplitChange('partnerId', e.target.value)}>
+                                        <option value="">Choose...</option>
+                                        {(partners || []).map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                                    </select>
+                                    </div>
+                                    <div>
+                                    <label className="text-[9px] font-bold text-blue-700 dark:text-blue-300 uppercase mb-1 block">Who Pays This?</label>
+                                    <div className="flex bg-white dark:bg-slate-800 rounded-lg border border-blue-200 dark:border-blue-700 overflow-hidden">
+                                        <button onClick={() => handleSplitChange('payer', 'me')} className={`flex-1 py-2 text-xs font-bold ${formData.splitConfig?.payer === 'me' ? 'bg-blue-600 text-white' : 'text-slate-500'}`}>Me</button>
+                                        <button onClick={() => handleSplitChange('payer', 'partner')} className={`flex-1 py-2 text-xs font-bold ${formData.splitConfig?.payer === 'partner' ? 'bg-blue-600 text-white' : 'text-slate-500'}`}>Partner</button>
+                                    </div>
+                                    </div>
+                                </div>
+                                <div>
+                                    <label className="text-[9px] font-bold text-blue-700 dark:text-blue-300 uppercase mb-1 block">Partner Pays (Amount)</label>
+                                    <MoneyInput value={formData.splitConfig?.partnerAmount || 0} onChange={v => handleSplitChange('partnerAmount', v)} />
+                                    <div className="text-[10px] text-blue-600 dark:text-blue-300 mt-1 text-right">
+                                    You pay: <strong>{Money.format((formData.amount || 0) - (formData.splitConfig?.partnerAmount || 0))}</strong>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
                     </div>
                  </div>
                )}
              </>
           )}
 
+          {/* ... (Account and Income Modes remain unchanged from previous turn) ... */}
           {mode === 'income' && (
              <>
                <div className="grid grid-cols-2 gap-4">
@@ -639,47 +689,33 @@ const UnifiedEntryModal = ({ isOpen, onClose, onSave, accounts, initialData, inc
                {formData.accountType === 'credit' && (
                  <div><label className="text-[10px] font-bold text-slate-400 uppercase mb-1 block">Paid from (Backing Account)</label><select className="w-full p-3 bg-slate-50 dark:bg-slate-900 dark:text-white border border-slate-200 dark:border-slate-700 rounded-xl text-sm font-bold outline-none" value={formData.linkedAccountId || ''} onChange={e => handleChange('linkedAccountId', e.target.value)}><option value="">Select Checking Account</option>{accounts.filter(a => a.type === 'checking').map(a => <option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
                )}
-               
-               {/* NEW: RETIREMENT TAGGING FOR ACCOUNTS */}
                {['savings', 'investment'].includes(formData.accountType) && (
                    <div className="mt-4 pt-4 border-t border-slate-100 dark:border-slate-700">
                        <label className="text-[9px] font-bold text-emerald-700 dark:text-emerald-400 uppercase mb-1 block">Tax Bucket Tag (Optional)</label>
-                       <select className="w-full p-2 bg-white dark:bg-slate-800 dark:text-white border border-slate-200 dark:border-slate-600 rounded-lg text-xs font-bold outline-none" value={formData.retirementType || 'none'} onChange={e => handleChange('retirementType', e.target.value)}>
+                       <select className="w-full p-2 bg-white dark:bg-slate-900 dark:text-white border border-slate-200 dark:border-slate-600 rounded-lg text-xs font-bold outline-none" value={formData.retirementType || 'none'} onChange={e => handleChange('retirementType', e.target.value)}>
                            <option value="none">Standard / None</option>
                            <option value="401k">401k / 403b</option>
                            <option value="ira">IRA / Roth IRA</option>
                            <option value="hsa">HSA / FSA</option>
                            <option value="taxable">Taxable Brokerage</option>
                        </select>
-                       <p className="text-[9px] text-slate-400 mt-1">Tagging this helps the Independence page calculate tax efficiency.</p>
                    </div>
                )}
-
-               {/* NEW: DAISY CHAIN & AUTOMATION LOGIC */}
                {['checking','savings'].includes(formData.accountType) && (
                    <div className="mt-4 pt-4 border-t border-slate-100 dark:border-slate-700">
                       <div className="flex justify-between items-center mb-2">
                          <div className="text-xs font-bold text-slate-600 dark:text-slate-300 flex items-center gap-2"><Zap size={14} className="text-amber-500"/> Funding & Automation</div>
                          <button onClick={() => setShowAutoConfig(!showAutoConfig)} className="text-[10px] font-bold text-blue-500 hover:text-blue-600">{showAutoConfig ? 'Hide' : 'Configure'}</button>
                       </div>
-                      
                       {showAutoConfig && (
                         <div className="bg-slate-50 dark:bg-slate-800/50 p-3 rounded-xl border border-slate-200 dark:border-slate-700 space-y-3 animate-in slide-in-from-top-2">
-                           {/* 1. DAISY CHAIN PARENT */}
                            <div>
                                <label className="text-[9px] font-bold text-slate-400 uppercase mb-1 block">Funded By (Parent Account)</label>
-                               <select 
-                                  className="w-full p-2 bg-white dark:bg-slate-900 dark:text-white border border-slate-200 dark:border-slate-600 rounded-lg text-xs font-bold outline-none" 
-                                  value={formData.fundedFromId || ''} 
-                                  onChange={e => handleChange('fundedFromId', e.target.value)}
-                               >
+                               <select className="w-full p-2 bg-white dark:bg-slate-900 dark:text-white border border-slate-200 dark:border-slate-600 rounded-lg text-xs font-bold outline-none" value={formData.fundedFromId || ''} onChange={e => handleChange('fundedFromId', e.target.value)}>
                                   <option value="">Direct Deposit (Default)</option>
                                   {accounts.filter(a => a.id !== formData.id && ['checking','savings'].includes(a.type)).map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
                                </select>
-                               <p className="text-[9px] text-slate-400 mt-1">If set, transfers will go from {accounts.find(a=>a.id===formData.fundedFromId)?.name || 'Direct Deposit'} &rarr; This Account.</p>
                            </div>
-
-                           {/* 2. AUTO TRANSFER CONFIG */}
                            <div className="pt-2 border-t border-slate-200 dark:border-slate-700">
                                <div className="flex justify-between items-center mb-2">
                                   <label className="text-[9px] font-bold text-slate-400 uppercase">Automatic Transfer?</label>

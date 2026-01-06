@@ -558,67 +558,79 @@ export default function App() {
     } catch (e) { console.error("Snapshot failed", e); }
   };
 
-  // --- REWRITTEN: CLEAR TRANSACTION LOGIC (Strict Read-First) ---
   const handleClearTransaction = async (item) => {
     if (isSimMode) return;
     if (!user) return;
 
     try {
       await runTransaction(db, async (transaction) => {
-        // 1. ALL READS FIRST (Strict Order)
+        // CASE: PENDING TRANSFER
+        if (item.type === 'transfer_pending') {
+             const sourceRef = doc(db, 'users', user.uid, 'accounts', item.sourceId);
+             const targetRef = doc(db, 'users', user.uid, 'accounts', item.targetId);
+             const transRef = doc(db, 'users', user.uid, 'transactions', item.id);
+
+             const sourceDoc = await transaction.get(sourceRef);
+             const targetDoc = await transaction.get(targetRef);
+
+             if (!sourceDoc.exists() || !targetDoc.exists()) throw new Error("Account not found");
+
+             const amount = item.amount;
+             
+             // Move money
+             transaction.update(sourceRef, { currentBalance: (sourceDoc.data().currentBalance || 0) - amount });
+             transaction.update(targetRef, { currentBalance: (targetDoc.data().currentBalance || 0) + amount });
+             
+             // Update transaction status
+             transaction.update(transRef, { type: 'transfer_cleared' });
+             return;
+        }
+
+        // CASE: STANDARD EXPENSE CLEARING
         const expenseRef = doc(db, 'users', user.uid, 'expenses', item.id);
         const expDoc = await transaction.get(expenseRef);
         if (!expDoc.exists()) throw new Error("Data missing");
         const expData = expDoc.data();
         
-        // Find the REAL account linked to the expense (Checking OR Credit Card)
         const realAccountId = expData.accountId;
         const accountRef = doc(db, 'users', user.uid, 'accounts', realAccountId);
         const accDoc = await transaction.get(accountRef);
         const accData = accDoc.data();
         
         const isCredit = (accData.type || '').toLowerCase() === 'credit';
+        const linkedBackingId = accData.linkedAccountId || accounts.find(a => a.type === 'checking')?.id;
         
-        // Determine Debt Bucket ID (Client-side helper to get ID, then Read)
         let debtBucket = null;
         let debtRef = null;
         let debtDoc = null;
-        // Logic to determine "Paid From" account: Use the linked account OR default checking
-        const linkedBackingId = accData.linkedAccountId || accounts.find(a => a.type === 'checking')?.id;
-        
+
         if (isCredit) {
-            // Find existing debt bucket from client state to get the ID
             debtBucket = expenses.find(e => e.type === 'debt' && e.totalDebtBalance === realAccountId && !e.deletedAt);
             if (debtBucket) {
                 debtRef = doc(db, 'users', user.uid, 'expenses', debtBucket.id);
-                debtDoc = await transaction.get(debtRef); // READ
+                debtDoc = await transaction.get(debtRef); 
             }
         }
 
-        // 2. ALL WRITES AFTER READS
         const amountToClear = item.amount || expData.amount;
         const newBal = (accData.currentBalance || 0) - amountToClear;
         
-        // A) Update Account Balance
         transaction.update(accountRef, { currentBalance: newBal });
 
-        // B) Handle Credit Card "Envelope Swap"
         if (isCredit) {
             if (debtBucket && debtDoc && debtDoc.exists()) {
-                // Update existing bucket
                 const currentDebtReserved = debtDoc.data().currentBalance || 0;
                 transaction.update(debtRef, { 
                     currentBalance: currentDebtReserved + amountToClear 
                 });
             } else {
-                // Create NEW bucket (Write)
                 const newDebtRef = doc(collection(db, 'users', user.uid, 'expenses'));
                 transaction.set(newDebtRef, {
                     name: `Pay ${accData.name}`,
                     amount: 0,
                     currentBalance: amountToClear,
-                    totalDebtBalance: realAccountId, // The CC is the target
-                    accountId: linkedBackingId, // The Backing Account (Checking) is the source/home
+                    totalDebtBalance: realAccountId, 
+                    accountId: linkedBackingId, 
                     type: 'debt',
                     frequency: 'Monthly',
                     createdAt: serverTimestamp(),
@@ -627,7 +639,6 @@ export default function App() {
             }
         }
 
-        // C) Log Transaction
         const transRef = doc(collection(db, 'users', user.uid, 'transactions'));
         transaction.set(transRef, {
             createdAt: serverTimestamp(),
@@ -638,7 +649,6 @@ export default function App() {
             description: isCredit ? 'Cleared on Credit Card (Funds Moved)' : 'Cleared from Account'
         });
 
-        // D) Reset Expense
         const updates = { isPaid: false, isCleared: false, currentBalance: 0 };
         if (expData.frequency && expData.frequency !== 'One-Time') {
             const nextDate = getNextDateStr(expData.date || expData.dueDate, expData.frequency);
@@ -656,7 +666,6 @@ export default function App() {
     }
   };
 
-  // --- REWRITTEN: UNDO TRANSACTION LOGIC (Soft Delete & Read-First) ---
   const handleUndoTransaction = async (transId, transactionData) => {
       if (isSimMode) return;
       if (!user) return;
@@ -667,7 +676,6 @@ export default function App() {
 
       try {
           if (type === 'bill_paid') {
-              // Simple Undo: Reset flags and Soft Delete log
               await updateDoc(doc(db, 'users', user.uid, 'expenses', expenseId), {
                   isPaid: false,
                   isCleared: false
@@ -676,9 +684,7 @@ export default function App() {
               addToast("Transaction Unmarked.");
           } 
           else if (type === 'expense_cleared') {
-              // Complex Undo: Reverse money movement
               await runTransaction(db, async (transaction) => {
-                  // 1. ALL READS FIRST
                   const expenseRef = doc(db, 'users', user.uid, 'expenses', expenseId);
                   const expDoc = await transaction.get(expenseRef);
                   if (!expDoc.exists()) throw "Expense not found";
@@ -689,11 +695,10 @@ export default function App() {
                   const accDoc = await transaction.get(accountRef);
                   const accData = accDoc.data();
                   
-                  // Check for debt bucket if credit
+                  const isCredit = (accData.type || '').toLowerCase() === 'credit';
                   let debtBucket = null;
                   let debtRef = null;
                   let debtDoc = null;
-                  const isCredit = (accData.type || '').toLowerCase() === 'credit';
 
                   if (isCredit) {
                       debtBucket = expenses.find(e => e.type === 'debt' && e.totalDebtBalance === accountId);
@@ -703,26 +708,21 @@ export default function App() {
                       }
                   }
 
-                  // 2. ALL WRITES
-                  // Restore Account Balance
                   transaction.update(accountRef, {
                       currentBalance: (accData.currentBalance || 0) + amount
                   });
 
-                  // Reverse Envelope Swap if needed
                   if (isCredit && debtBucket && debtDoc && debtDoc.exists()) {
                       const current = debtDoc.data().currentBalance || 0;
                       transaction.update(debtRef, { currentBalance: Math.max(0, current - amount) });
                   }
 
-                  // Reset Expense Flags (Back to "Paid but Pending")
                   transaction.update(expenseRef, {
                       isPaid: true, 
                       isCleared: false,
                       currentBalance: amount 
                   });
                   
-                  // Soft Delete Log
                   const transRef = doc(db, 'users', user.uid, 'transactions', transId);
                   transaction.update(transRef, { type: 'voided', voidedAt: serverTimestamp() });
               });
@@ -772,15 +772,11 @@ export default function App() {
     } catch (e) { addToast("Payment Failed: " + e.message, 'error'); }
   };
 
+  // --- UPDATED: updateExpense with Linked Bucket & BNPL Logic ---
   const updateExpense = async (id, field, value, customAmountStr = null) => {
-    if (isSimMode) {
-        setSimData(prev => { return prev; }); 
-        addToast("Updated (Sim)");
-        return;
-    }
-
+    if (isSimMode) { setSimData(prev => prev); addToast("Updated (Sim)"); return; }
     if (!user) return;
-    
+
     const expenseItem = expenses.find(e => e.id === id);
     if (!expenseItem) return;
     const accountId = expenseItem.accountId;
@@ -790,7 +786,7 @@ export default function App() {
       if (field === 'spent' || field === 'isPaid' || field === 'addedFunds' || field === 'isCleared') {
         
         const expRef = doc(db, 'users', user.uid, 'expenses', id);
-        const transRef = doc(collection(db, 'users', user.uid, 'transactions')); 
+        const transRef = doc(collection(db, 'users', user.uid, 'transactions'));
         const accRef = accountId ? doc(db, 'users', user.uid, 'accounts', accountId) : null;
         const debtRef = linkedDebtBucket ? doc(db, 'users', user.uid, 'expenses', linkedDebtBucket.id) : null;
 
@@ -812,6 +808,18 @@ export default function App() {
           let newAccBal = accDoc && accDoc.exists() ? (accDoc.data().currentBalance || 0) : 0;
           let debtBucketBal = debtDoc && debtDoc.exists() ? (debtDoc.data().currentBalance || 0) : 0;
           const isCreditAccount = accDoc && accDoc.exists() && accDoc.data().type === 'credit';
+
+          // --- NEW: LINKED PARENT BUCKET DEDUCTION ---
+          // If this expense is funded by another bucket (parentExpenseId), deduct from THERE.
+          if (field === 'spent' && exp.parentExpenseId) {
+             const parentRef = doc(db, 'users', user.uid, 'expenses', exp.parentExpenseId);
+             const parentDoc = await transaction.get(parentRef);
+             if (parentDoc.exists()) {
+                 const parentBal = parentDoc.data().currentBalance || 0;
+                 transaction.update(parentRef, { currentBalance: parentBal - value });
+                 // Note: We still update the account balance below because money physically left the account.
+             }
+          }
 
           if (field === 'addedFunds') {
             currentBucketBal += value;
@@ -841,8 +849,32 @@ export default function App() {
              if (value === true) {
                 let amountToPay = exp.amount || 0;
                 if (customAmountStr) amountToPay = Money.toCents(customAmountStr);
+                
+                // --- NEW: BNPL LOGIC ---
+                if (exp.type === 'bnpl') {
+                    const currentPaid = exp.installmentsPaid || 0;
+                    const total = exp.totalInstallments || 1;
+                    const nextDate = getNextDateStr(exp.date || exp.dueDate, exp.frequency);
+                    
+                    if (currentPaid + 1 < total) {
+                        transaction.update(expRef, {
+                            installmentsPaid: currentPaid + 1,
+                            date: nextDate,
+                            isPaid: false // Reset for next cycle
+                        });
+                    } else {
+                        transaction.update(expRef, {
+                            installmentsPaid: total,
+                            isPaid: true,
+                            name: `${exp.name} (Paid Off)`
+                        });
+                    }
+                    // BNPL payments still log a transaction and reserve funds below
+                } else {
+                    // Standard Logic
+                    transaction.update(expRef, { isPaid: true, isCleared: false, currentBalance: amountToPay });
+                }
 
-                transaction.update(expRef, { isPaid: true, isCleared: false, currentBalance: amountToPay });
                 logAmount = -amountToPay;
                 logType = 'bill_paid';
              } 
@@ -909,8 +941,10 @@ export default function App() {
     accounts.forEach(a => s[a.id] = { requiredBalance: 0, pendingBalance: 0, totalFlow: 0, items: [], heldForCredit: 0, reservedItems: [] });
     const primaryIncome = incomes.find(i => i.isPrimary) || incomes[0];
 
+    // 1. Process Expenses
     expenses.forEach(e => {
-      if (e.splitConfig?.isOwedOnly) return;
+      // EXCLUDE Linked Expenses from allocation requirements (Parent bucket holds the money)
+      if (e.splitConfig?.isOwedOnly || e.parentExpenseId) return;
       if (e.isCleared) return;
       
       const targetAcc = accounts.find(a => a.id === e.accountId);
@@ -952,7 +986,7 @@ export default function App() {
       }
 
       if (allocatedVal > 0) {
-          const isBillType = ['bill', 'loan', 'subscription'].includes(e.type);
+          const isBillType = ['bill', 'loan', 'subscription', 'bnpl'].includes(e.type); // Included bnpl
           const currentDueDate = e.date || e.dueDate;
           const displayDate = (isBillType && e.isPaid && !e.isCleared) 
                               ? getNextDateStr(currentDueDate, e.frequency) 
@@ -989,8 +1023,27 @@ export default function App() {
           }
       }
     });
+
+    // 2. Process Pending Transfers (NEW)
+    transactions.filter(t => t.type === 'transfer_pending').forEach(t => {
+        if (s[t.sourceId]) {
+            s[t.sourceId].pendingBalance += t.amount;
+            s[t.sourceId].reservedItems.push({
+                id: t.id,
+                name: `Transfer -> ${t.targetName || 'Account'}`,
+                amount: t.amount,
+                type: 'Pending Transfer',
+                originalType: 'transfer',
+                accountId: t.sourceId,
+                isPending: true,
+                date: t.date
+            });
+        }
+    });
+
     return s;
-  }, [expenses, accounts, incomes]);
+  }, [expenses, accounts, incomes, transactions]);
+
 
   const safeToSpend = useMemo(() => {
     let totalSafe = 0;
@@ -1032,7 +1085,7 @@ export default function App() {
       const items = [];
       const windowStart = new Date();
       expenses.forEach(e => {
-          if (['bill', 'subscription', 'loan'].includes(e.type)) {
+          if (['bill', 'subscription', 'loan', 'bnpl'].includes(e.type)) { // Added BNPL
                const startDate = e.date || e.dueDate || e.nextDate;
                if (!startDate) return;
                const occs = getOccurrencesInWindow(startDate, e.frequency, windowStart, 90);
@@ -1160,12 +1213,6 @@ export default function App() {
                   if (acc.type === 'loan') borderColor = 'border-blue-200 dark:border-blue-900';
                   if (acc.type === 'investment') borderColor = 'border-purple-200 dark:border-purple-900';
 
-                  // LINKED AGGREGATION LOGIC: 
-                  // If this account is linked to savings goals, we might want to show that here, 
-                  // but typically we aggregate UP to the savings goal card, not down to the account card.
-                  // The prompt requested aggregation on the "Savings Goal" display (in Budget/Dashboard lists),
-                  // which is handled in the Expenses map loop below.
-                  
                   return (
                     <div key={acc.id} onClick={() => { if(acc.type === 'credit') setPayCardAccount(acc); else if (!isTrackingAccount) setBreakdownModal({ accountId: acc.id, name: acc.name }); }} className={`bg-white dark:bg-slate-900 p-6 rounded-2xl border ${borderColor} shadow-sm cursor-pointer hover:border-emerald-500 transition-colors relative overflow-hidden`}>
                       {isFullyAllocated && <div className="absolute top-0 right-0 bg-emerald-100 text-emerald-600 px-3 py-1 rounded-bl-xl text-[10px] font-bold uppercase tracking-wider flex items-center gap-1 shadow-sm"><Medal size={12}/> Zero-Based Hero</div>}
@@ -1242,16 +1289,15 @@ export default function App() {
              </div>
           )}
 
-          {/* UPDATED: Pass settings and update function to FireDashboard */}
           {activeTab === 'fire' && (
-             <FireDashboard 
-                 expenses={expenses} 
-                 incomes={derivedIncomes} 
-                 accounts={accounts} 
-                 updateAccount={updateAccount}
-                 fireSettings={fireSettings}
-                 updateFireSettings={updateFireSettings}
-             />
+            <FireDashboard 
+                expenses={expenses} 
+                incomes={derivedIncomes} 
+                accounts={accounts} 
+                updateAccount={updateAccount}
+                fireSettings={fireSettings} 
+                updateFireSettings={updateFireSettings} 
+            />
           )}
 
           {activeTab === 'budget' && (
@@ -1274,13 +1320,9 @@ export default function App() {
                     </div>
                     <div className="divide-y divide-slate-100 dark:divide-slate-800 max-h-[400px] overflow-y-auto custom-scrollbar">
                         {forecastFeed.map((item, idx) => {
-                          // FIX: Use T12:00:00 to prevent local time shift to previous day
                           const dateObj = new Date(item.date + 'T12:00:00');
                           const dayName = dateObj.toLocaleDateString('en-US', { weekday: 'short' });
                           const monthDay = dateObj.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-                          
-                          // FIX: Only show "PENDING" if this specific occurrence is the one that was paid.
-                          // i.e., Does this forecast item's date match the due date currently stored on the original object?
                           const isEffectivePaid = item.original.isPaid && (item.date === (item.original.date || item.original.dueDate));
                           const isCleared = item.original.isCleared;
                           
@@ -1379,7 +1421,7 @@ export default function App() {
                             const linkedAccountForDebt = type === 'debt' ? accounts.find(a => a.id === item.totalDebtBalance) : null;
                             const isCreditDebt = linkedAccountForDebt?.type === 'credit';
 
-                            // --- NEW: MULTI-ACCOUNT SAVINGS AGGREGATION LOGIC ---
+                            // --- LINKED AGGREGATION (For Savings) ---
                             let displayBalance = item.currentBalance;
                             if (type === 'savings' && item.linkedAccountIds && item.linkedAccountIds.length > 0) {
                                 displayBalance = item.linkedAccountIds.reduce((sum, id) => {
@@ -1404,7 +1446,7 @@ export default function App() {
                                 progress={type==='variable' ? progress : undefined} 
                                 date={item.date || item.dueDate}
                                 type={type} 
-                                currentBalance={displayBalance} // Use aggregated balance
+                                currentBalance={displayBalance} // Use new displayBalance
                                 savingsType={item.savingsType} 
                                 targetAmount={item.targetBalance}
                                 pendingPayment={item.pendingPayment} 
@@ -1525,7 +1567,18 @@ export default function App() {
 
       {/* FLOATING ACTION BUTTON & MODALS */}
       <SpeedDial onAdd={(type) => { setModalType(type); setModalContext(type); }} />
-      <UnifiedEntryModal isOpen={!!modalType} onClose={() => { setModalType(null); setEditingItem(null); setModalContext(null); }} onSave={handleAddItem} accounts={accounts} initialData={editingItem} incomes={incomes} type={modalType} context={modalContext} partners={partners} />
+      <UnifiedEntryModal 
+          isOpen={!!modalType} 
+          onClose={() => { setModalType(null); setEditingItem(null); setModalContext(null); }} 
+          onSave={handleAddItem} 
+          accounts={accounts} 
+          expenses={expenses} // Pass full expenses list for Linking
+          initialData={editingItem} 
+          incomes={incomes} 
+          type={modalType} 
+          context={modalContext} 
+          partners={partners} 
+      />
       {/* UPDATE: PaydayWizard now receives the completion handler */}
       <PaydayWizard 
           isOpen={showPayday} 
@@ -1547,7 +1600,8 @@ export default function App() {
         onClear={handleClearTransaction} 
         onMarkPaid={updateExpense} 
         updateExpense={updateExpense} 
-        onPayDebt={(item) => setPayingDebtItem(item)} // PASSED PROP
+        onPayDebt={(item) => setPayingDebtItem(item)} 
+        transactions={transactions} // PASS TRANSACTIONS FOR PENDING TRANSFERS
       />
       <SafeToSpendInfoModal isOpen={showSafeInfo} onClose={() => setShowSafeInfo(false)} safeAmount={safeToSpend} accountName={accounts.find(a => a.isDiscretionary)?.name} />
       <CreditPaymentModal isOpen={!!payCardAccount} onClose={() => setPayCardAccount(null)} account={payCardAccount} onPay={handleAtomicPayment} accounts={accounts} />
