@@ -18,20 +18,17 @@ export const ToastContainer = ({ toasts, removeToast }) => (
   </div>
 );
 
-// 2. Adjustment Modal (FIXED: Cents Handling)
+// 2. Adjustment Modal
 export const AdjustmentModal = ({ isOpen, onClose, item, onConfirm, actionLabel = "Confirm" }) => {
-    const [amount, setAmount] = useState(0); // Stores CENTS (Integer)
+    const [amount, setAmount] = useState(0); 
     
     useEffect(() => {
         if(item) {
-            // FIX: Pass raw cents (integer) to state. MoneyInput handles the /100 display logic.
             setAmount(item.amount || 0); 
         }
     }, [item]);
 
     const handleConfirm = () => {
-        // FIX: Convert cents BACK to string dollar format ("15.00") because 
-        // the parent updateExpense function expects a string to run Money.toCents() on.
         const dollarString = (amount / 100).toFixed(2);
         onConfirm(item, dollarString);
         onClose();
@@ -76,24 +73,20 @@ export const ConfirmationModal = ({ isOpen, onClose, onConfirm, title, message, 
   );
 };
 
-// 4. Daily Audit
+// 4. Daily Audit (UPDATED FILTERS)
 export const DailyAuditModal = ({ isOpen, onClose, accounts, updateAccount, expenses = [], onClear, onMarkPaid, updateExpense, onPayDebt }) => {
   const [step, setStep] = useState(1); 
   const [balances, setBalances] = useState({});
   const [calcData, setCalcData] = useState({});
   const [showUpcoming, setShowUpcoming] = useState(false);
-  const [adjustItem, setAdjustItem] = useState(null); // For adjustment modal
+  const [adjustItem, setAdjustItem] = useState(null); 
   const today = getTodayStr();
   
-  // --- FILTER LOGIC ---
   const pendingItems = useMemo(() => {
       return expenses.filter(e => {
           if (e.splitConfig?.isOwedOnly) return false; 
           
-          // Case A: Standard Bill/Loan/Sub/Debt/Savings that is marked paid but not cleared
           if (e.isPaid && !e.isCleared) return true;
-          
-          // Case B: Atomic Debt pending (partial payments from CreditPaymentModal)
           if (e.type === 'debt' && (e.pendingPayment || 0) > 0) return true;
           
           return false;
@@ -102,10 +95,15 @@ export const DailyAuditModal = ({ isOpen, onClose, accounts, updateAccount, expe
 
   const dueItems = useMemo(() => {
       return expenses.filter(e => {
+          // --- FILTER: HIDE FROM AUDIT ---
           if (e.splitConfig?.isOwedOnly) return false; 
           if (e.isPaid) return false;
-          
-          // Any expense with a date <= today
+          if (e.excludeFromPayday) return false; // Hide Pre-tax
+          if (e.type === 'savings') return false; // Hide Savings (Handled by Payday)
+          if (e.type === 'variable') return false; // Hide Buckets (Handled by Log)
+          // Hide Debt unless allocated
+          if (e.type === 'debt' && (e.amount || 0) <= 0) return false;
+
           const d = e.date || e.dueDate || e.nextDate;
           return d && d <= today;
       });
@@ -115,14 +113,16 @@ export const DailyAuditModal = ({ isOpen, onClose, accounts, updateAccount, expe
       const list = [];
       expenses.forEach(e => {
           if (e.splitConfig?.isOwedOnly) return;
+          if (e.excludeFromPayday) return;
+          if (e.type === 'savings') return;
+          if (e.type === 'variable') return;
+          if (e.type === 'debt' && (e.amount || 0) <= 0) return;
           
           let targetDate = e.date || e.dueDate || e.nextDate;
           if (!targetDate) return;
 
           let isFutureAllocated = false;
 
-          // Logic: If it is currently paid (pending clearance), we want to show the NEXT occurrence
-          // as "Upcoming" because funds are likely allocated for it.
           if (e.isPaid && !e.isCleared) {
               const nextD = getNextDateStr(targetDate, e.frequency);
               if (nextD > today) {
@@ -132,11 +132,9 @@ export const DailyAuditModal = ({ isOpen, onClose, accounts, updateAccount, expe
                   return; 
               }
           } else if (e.isPaid) {
-              // Fully cleared and paid, wait for next cycle
               return;
           }
 
-          // Standard Check
           if (targetDate > today) {
               list.push({ 
                   ...e, 
@@ -151,7 +149,7 @@ export const DailyAuditModal = ({ isOpen, onClose, accounts, updateAccount, expe
 
   const variableWallets = useMemo(() => {
       // Variable items WITHOUT dates go here (pure buckets)
-      return expenses.filter(e => e.type === 'variable' && !e.splitConfig?.isOwedOnly && !e.date && !e.dueDate && !e.nextDate);
+      return expenses.filter(e => e.type === 'variable' && !e.splitConfig?.isOwedOnly && !e.date && !e.dueDate && !e.nextDate && !e.excludeFromPayday);
   }, [expenses]);
 
   const auditAccounts = useMemo(() => {
@@ -167,7 +165,6 @@ export const DailyAuditModal = ({ isOpen, onClose, accounts, updateAccount, expe
         auditAccounts.forEach(a => initial[a.id] = a.currentBalance || 0);
         setBalances(initial);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]); 
 
   if(!isOpen) return null;
@@ -335,11 +332,11 @@ export const DailyAuditModal = ({ isOpen, onClose, accounts, updateAccount, expe
                                     </div>
                                     <div className="grid grid-cols-2 gap-2">
                                         <div className="flex gap-1">
-                                            <input type="number" id={`audit-add-${item.id}`} placeholder="Add" className="w-full p-1 text-xs rounded border dark:border-slate-600 dark:bg-slate-900 dark:text-white" />
+                                            <input type="number" id={`audit-add-${item.id}`} placeholder="Add" className="w-full p-1 text-xs rounded border dark:border-slate-600 dark:bg-slate-900 dark:text-white" onWheel={(e) => e.target.blur()} />
                                             <button onClick={() => handleAddFunds(item.id, document.getElementById(`audit-add-${item.id}`).value)} className="p-1 bg-emerald-100 text-emerald-600 rounded hover:bg-emerald-200"><Plus size={14}/></button>
                                         </div>
                                         <div className="flex gap-1">
-                                            <input type="number" id={`audit-spd-${item.id}`} placeholder="Spend" className="w-full p-1 text-xs rounded border dark:border-slate-600 dark:bg-slate-900 dark:text-white" />
+                                            <input type="number" id={`audit-spd-${item.id}`} placeholder="Spend" className="w-full p-1 text-xs rounded border dark:border-slate-600 dark:bg-slate-900 dark:text-white" onWheel={(e) => e.target.blur()} />
                                             <button onClick={() => handleLogSpend(item.id, document.getElementById(`audit-spd-${item.id}`).value)} className="p-1 bg-red-100 text-red-600 rounded hover:bg-red-200"><Minus size={14}/></button>
                                         </div>
                                     </div>
@@ -369,14 +366,14 @@ export const DailyAuditModal = ({ isOpen, onClose, accounts, updateAccount, expe
                     {showCalc && (
                     <div className="space-y-2 mb-4 bg-white dark:bg-slate-900 p-3 rounded-lg border border-slate-200 dark:border-slate-700 animate-in slide-in-from-top-2">
                         <div className="grid grid-cols-2 gap-2">
-                        <div><label className="text-[9px] uppercase font-bold text-slate-400">Posted Bal</label><MoneyInput value={calcData[acc.id]?.posted} onChange={v => handleCalcChange(acc.id, 'posted', v)}/></div>
-                        <div><label className="text-[9px] uppercase font-bold text-slate-400">Pending Charges</label><MoneyInput value={calcData[acc.id]?.pendingCharges} onChange={v => handleCalcChange(acc.id, 'pendingCharges', v)}/></div>
+                        <div><label className="text-[9px] uppercase font-bold text-slate-400">Posted Bal</label><MoneyInput value={calcData[acc.id]?.posted} onChange={v => handleCalcChange(acc.id, 'posted', v)} onWheel={(e) => e.target.blur()} /></div>
+                        <div><label className="text-[9px] uppercase font-bold text-slate-400">Pending Charges</label><MoneyInput value={calcData[acc.id]?.pendingCharges} onChange={v => handleCalcChange(acc.id, 'pendingCharges', v)} onWheel={(e) => e.target.blur()} /></div>
                         </div>
-                        <div><label className="text-[9px] uppercase font-bold text-slate-400">Pending Payments</label><MoneyInput value={calcData[acc.id]?.pendingPayments} onChange={v => handleCalcChange(acc.id, 'pendingPayments', v)}/></div>
+                        <div><label className="text-[9px] uppercase font-bold text-slate-400">Pending Payments</label><MoneyInput value={calcData[acc.id]?.pendingPayments} onChange={v => handleCalcChange(acc.id, 'pendingPayments', v)} onWheel={(e) => e.target.blur()} /></div>
                         <div className="text-[10px] text-center text-indigo-500 font-bold">Auto-Calculating True Balance...</div>
                     </div>
                     )}
-                    <MoneyInput value={balances[acc.id]} onChange={(val) => setBalances({...balances, [acc.id]: val})} />
+                    <MoneyInput value={balances[acc.id]} onChange={(val) => setBalances({...balances, [acc.id]: val})} onWheel={(e) => e.target.blur()} />
                 </div>
                 )})}
             </div>
@@ -402,7 +399,7 @@ export const DailyAuditModal = ({ isOpen, onClose, accounts, updateAccount, expe
         isOpen={!!adjustItem} 
         onClose={() => setAdjustItem(null)} 
         item={adjustItem} 
-        onConfirm={(item, amt) => onMarkPaid(item.id, 'isPaid', true, amt)} // Pass amt to handler
+        onConfirm={(item, amt) => onMarkPaid(item.id, 'isPaid', true, amt)} 
         actionLabel="Confirm & Mark Paid"
     />
     </>
@@ -410,7 +407,7 @@ export const DailyAuditModal = ({ isOpen, onClose, accounts, updateAccount, expe
 };
 
 // ... (CycleEnd, CreditPayment, SafeToSpend, PartnerIncomeBreakdown) ...
-// (I am re-including these so you don't lose them if you paste the whole file)
+// (I will omit the full re-paste of these smaller modals unless you need them, they are unchanged except for scroll safety which is minor)
 
 export const CycleEndModal = ({ isOpen, onClose, expense, savingsGoals, debts, updateExpense }) => {
   const [action, setAction] = useState(null);
@@ -489,7 +486,7 @@ export const CreditPaymentModal = ({ isOpen, onClose, account, onPay, accounts }
       <div className="bg-white dark:bg-slate-900 w-full max-w-sm rounded-xl p-6 border border-slate-200 dark:border-slate-800">
         <h3 className="font-bold text-lg mb-4 dark:text-white">Pay {account.name}</h3>
         <div className="space-y-4">
-          <MoneyInput value={amount} onChange={setAmount} placeholder="Amount to Pay" />
+          <MoneyInput value={amount} onChange={setAmount} placeholder="Amount to Pay" onWheel={(e) => e.target.blur()}/>
           <div>
             <label className="text-[10px] font-bold text-slate-400 uppercase mb-1 block">Pay From</label>
             <select className="w-full p-3 bg-slate-50 dark:bg-slate-900 dark:text-white border border-slate-200 dark:border-slate-700 rounded-xl text-sm font-bold outline-none" value={fromAccount} onChange={e => setFromAccount(e.target.value)}>
@@ -512,13 +509,12 @@ export const SafeToSpendInfoModal = ({ isOpen, onClose, safeAmount, accountName 
   return (<div className="fixed inset-0 z-[140] bg-black/60 backdrop-blur-sm flex items-center justify-center p-6 animate-in fade-in" onClick={onClose}><div className="bg-white dark:bg-slate-900 w-full max-w-sm rounded-2xl p-6 shadow-2xl border border-slate-200 dark:border-slate-800" onClick={e => e.stopPropagation()}><div className="flex justify-between items-center mb-4"><h3 className="text-lg font-bold text-slate-800 dark:text-white">Real-Time Liquidity</h3><button onClick={onClose}><X size={20} className="text-slate-400"/></button></div><div className="space-y-4"><div className="bg-emerald-50 dark:bg-emerald-900/20 p-4 rounded-xl text-center border border-emerald-100 dark:border-emerald-800"><div className="text-3xl font-extrabold text-emerald-600 dark:text-emerald-400">{Money.format(safeAmount)}</div><div className="text-xs font-bold text-emerald-800 dark:text-emerald-300 uppercase mt-1">Safe To Spend</div></div><div className="text-sm text-slate-600 dark:text-slate-300"><p>This is the actual cash sitting in <strong>{accountName || 'Checking'}</strong> right now that is <strong>NOT</strong> reserved for any upcoming bills or savings goals.</p><br/><p className="text-xs text-slate-400">Unlike "Budget Remaining," this number is based on your real bank balance.</p></div></div></div></div>);
 };
 
-// 7. Reserved Breakdown (INTERACTIVE & SMART)
+// 7. Reserved Breakdown
 export const ReservedBreakdownModal = ({ isOpen, onClose, items, accountName, onMarkPaid, onClear, updateExpense }) => {
-  const [adjustItem, setAdjustItem] = useState(null); // Local state for the confirmation modal
+  const [adjustItem, setAdjustItem] = useState(null); 
 
   if(!isOpen) return null;
 
-  // Split items into two groups
   const pendingItems = items.filter(i => i.isPending);
   const reservedItems = items.filter(i => !i.isPending);
   
@@ -540,7 +536,6 @@ export const ReservedBreakdownModal = ({ isOpen, onClose, items, accountName, on
     <div className="fixed inset-0 z-[150] bg-black/60 backdrop-blur-sm flex items-center justify-center p-6 animate-in fade-in" onClick={onClose}>
       <div className="bg-white dark:bg-slate-900 w-full max-w-md rounded-2xl p-6 shadow-2xl border border-slate-200 dark:border-slate-800 flex flex-col max-h-[85vh]" onClick={e => e.stopPropagation()}>
         
-        {/* Header */}
         <div className="flex justify-between items-center mb-4">
           <div><h3 className="text-lg font-bold text-slate-800 dark:text-white">Funds Breakdown</h3><p className="text-xs text-slate-500">{accountName}</p></div>
           <button onClick={onClose}><X size={20} className="text-slate-400 hover:text-slate-600"/></button>
@@ -548,7 +543,6 @@ export const ReservedBreakdownModal = ({ isOpen, onClose, items, accountName, on
 
         <div className="flex-1 overflow-y-auto custom-scrollbar space-y-6 pr-2">
             
-            {/* SECTION 1: PENDING CLEARANCE */}
             {pendingItems.length > 0 && (
                 <div className="animate-in slide-in-from-left-4">
                      <h4 className="text-xs font-bold text-blue-500 uppercase mb-2 flex items-center gap-2 sticky top-0 bg-white dark:bg-slate-900 z-10 py-1"><Info size={14}/> Pending Clearance ({Money.format(totalPending)})</h4>
@@ -571,13 +565,11 @@ export const ReservedBreakdownModal = ({ isOpen, onClose, items, accountName, on
                 </div>
             )}
 
-            {/* SECTION 2: ALLOCATED / RESERVED */}
             {reservedItems.length > 0 && (
                 <div className="animate-in slide-in-from-left-4 delay-75">
                     <h4 className="text-xs font-bold text-amber-500 uppercase mb-2 flex items-center gap-2 sticky top-0 bg-white dark:bg-slate-900 z-10 py-1"><PiggyBank size={14}/> Available / Reserved ({Money.format(totalReserved)})</h4>
                     <div className="space-y-2">
                         {reservedItems.map((item, idx) => {
-                             // UPDATED: Include ALL types that might be paid
                              const isPayable = ['bill', 'loan', 'subscription', 'debt'].includes(item.originalType);
                              const isVariable = item.originalType === 'variable';
 
@@ -599,15 +591,14 @@ export const ReservedBreakdownModal = ({ isOpen, onClose, items, accountName, on
                                         </div>
                                     </div>
 
-                                    {/* Variable Controls */}
                                     {isVariable && (
                                         <div className="grid grid-cols-2 gap-2 mt-2 pt-2 border-t border-slate-200 dark:border-slate-700">
                                             <div className="flex gap-1">
-                                                <input type="number" id={`res-add-${item.id}`} placeholder="Add" className="w-full p-1 text-xs rounded border dark:border-slate-600 dark:bg-slate-900 dark:text-white" onClick={e => e.stopPropagation()} />
+                                                <input type="number" id={`res-add-${item.id}`} placeholder="Add" className="w-full p-1 text-xs rounded border dark:border-slate-600 dark:bg-slate-900 dark:text-white" onClick={e => e.stopPropagation()} onWheel={(e) => e.target.blur()} />
                                                 <button onClick={() => handleAddFunds(item.id, document.getElementById(`res-add-${item.id}`).value)} className="p-1.5 bg-emerald-100 text-emerald-600 rounded hover:bg-emerald-200"><Plus size={12}/></button>
                                             </div>
                                             <div className="flex gap-1">
-                                                <input type="number" id={`res-spd-${item.id}`} placeholder="Spend" className="w-full p-1 text-xs rounded border dark:border-slate-600 dark:bg-slate-900 dark:text-white" onClick={e => e.stopPropagation()} />
+                                                <input type="number" id={`res-spd-${item.id}`} placeholder="Spend" className="w-full p-1 text-xs rounded border dark:border-slate-600 dark:bg-slate-900 dark:text-white" onClick={e => e.stopPropagation()} onWheel={(e) => e.target.blur()} />
                                                 <button onClick={() => handleLogSpend(item.id, document.getElementById(`res-spd-${item.id}`).value)} className="p-1.5 bg-red-100 text-red-600 rounded hover:bg-red-200"><Minus size={12}/></button>
                                             </div>
                                         </div>
@@ -622,7 +613,6 @@ export const ReservedBreakdownModal = ({ isOpen, onClose, items, accountName, on
             {items.length === 0 && <div className="text-center text-slate-400 py-8 text-sm">No funds reserved in this account.</div>}
         </div>
         
-        {/* Footer Totals */}
         <div className="pt-4 border-t border-slate-100 dark:border-slate-800 flex justify-between items-center">
              <div className="text-xs text-slate-400 font-bold uppercase">Total Withheld</div>
              <div className="font-black text-xl text-slate-800 dark:text-white">{Money.format(totalReserved + totalPending)}</div>
@@ -630,7 +620,6 @@ export const ReservedBreakdownModal = ({ isOpen, onClose, items, accountName, on
       </div>
     </div>
 
-    {/* Integrated Adjustment Modal for "Mark Paid" robustness */}
     <AdjustmentModal 
         isOpen={!!adjustItem} 
         onClose={() => setAdjustItem(null)} 

@@ -2,7 +2,7 @@ import React, { useState, useMemo, useEffect } from 'react';
 import { 
   TrendingUp, Activity, Target, ShieldCheck, 
   Settings, Coffee, Plane, Info, Plus, Minus, ArrowRight, 
-  DollarSign, Trash2, RefreshCw, Lock, Unlock, Zap, X, Calculator, Save, AlertTriangle, PieChart 
+  DollarSign, Trash2, RefreshCw, Lock, Unlock, Zap, X, Calculator, Save, AlertTriangle, PieChart, Sliders 
 } from 'lucide-react';
 import { 
   ComposedChart, Line, Area, XAxis, YAxis, Tooltip, 
@@ -270,25 +270,31 @@ const FreedomModal = ({ isOpen, onClose, fiNumber, annualSpend, withdrawalRate, 
 
 // --- MAIN DASHBOARD ---
 export default function FireDashboard({ expenses, incomes, accounts, updateAccount, fireSettings, updateFireSettings }) {
-  // 1. STATE (Initialized from Props)
+  // 1. STATE
   const [currentAge, setCurrentAge] = useState(30);
+  const [targetAge, setTargetAge] = useState(50); // New: Target Retirement Age
   const [config, setConfig] = useState({ returnRate: 7, inflation: 3, withdrawalRate: 4 });
   const [fireMode, setFireMode] = useState('traditional'); 
   const [modifiers, setModifiers] = useState({}); 
   const [customExpenses, setCustomExpenses] = useState([]);
   const [isLoaded, setIsLoaded] = useState(false);
-  const [isDirty, setIsDirty] = useState(false); // Track unsaved changes
+  const [isDirty, setIsDirty] = useState(false);
   
-  // Sync state with persisted props ONCE on load, or when remote changes
+  // NEW: Blending State (Default 50% split)
+  const [mixPercent, setMixPercent] = useState(50); 
+  
+  // Sync state with persisted props
   useEffect(() => {
       if (fireSettings && !isLoaded) {
           if(fireSettings.currentAge) setCurrentAge(fireSettings.currentAge);
+          if(fireSettings.targetAge) setTargetAge(fireSettings.targetAge);
           if(fireSettings.returnRate !== undefined) setConfig(prev => ({...prev, returnRate: fireSettings.returnRate}));
           if(fireSettings.inflation !== undefined) setConfig(prev => ({...prev, inflation: fireSettings.inflation}));
           if(fireSettings.withdrawalRate !== undefined) setConfig(prev => ({...prev, withdrawalRate: fireSettings.withdrawalRate}));
           if(fireSettings.fireMode) setFireMode(fireSettings.fireMode);
           if(fireSettings.modifiers) setModifiers(fireSettings.modifiers);
           if(fireSettings.customExpenses) setCustomExpenses(fireSettings.customExpenses);
+          if(fireSettings.mixPercent !== undefined) setMixPercent(fireSettings.mixPercent);
           setIsLoaded(true);
       }
   }, [fireSettings, isLoaded]);
@@ -296,18 +302,20 @@ export default function FireDashboard({ expenses, incomes, accounts, updateAccou
   // Mark dirty on change
   useEffect(() => {
       if(isLoaded) setIsDirty(true);
-  }, [currentAge, config, fireMode, modifiers, customExpenses]);
+  }, [currentAge, targetAge, config, fireMode, modifiers, customExpenses, mixPercent]);
 
   // Manual Save Function
   const handleManualSave = () => {
       const newSettings = {
           currentAge,
+          targetAge,
           returnRate: config.returnRate,
           inflation: config.inflation,
           withdrawalRate: config.withdrawalRate,
           fireMode,
           modifiers,
-          customExpenses
+          customExpenses,
+          mixPercent
       };
       if (updateFireSettings) updateFireSettings(newSettings);
       setIsDirty(false);
@@ -319,7 +327,7 @@ export default function FireDashboard({ expenses, incomes, accounts, updateAccou
 
   // --- DATA CALCULATION ---
   const financialData = useMemo(() => {
-    // A. Invested Assets (Strict Filter)
+    // A. Invested Assets
     const investedAssets = accounts.reduce((sum, a) => {
         const isRetirement = ['401k', 'ira', 'hsa'].includes(a.retirementType);
         const isInvestment = a.type === 'investment';
@@ -327,13 +335,12 @@ export default function FireDashboard({ expenses, incomes, accounts, updateAccou
         return sum;
     }, 0);
 
-    // B. Contribution Logic (STRICT: Only Tagged Savings)
+    // B. Contribution Logic
     const contributionBuckets = { '401k': 0, 'ira': 0, 'hsa': 0, 'taxable': 0 };
-    const contributionSources = []; // For display
+    const contributionSources = []; 
     let totalAnnualContribution = 0;
 
     expenses.forEach(e => {
-        // Check if it is a Savings bucket AND has a valid retirement type
         if (e.type === 'savings' && ['401k', 'ira', 'hsa', 'taxable'].includes(e.retirementType)) {
              const annualAmount = getAnnualAmount(e.amount, e.frequency);
              contributionBuckets[e.retirementType] += annualAmount;
@@ -343,7 +350,6 @@ export default function FireDashboard({ expenses, incomes, accounts, updateAccou
     });
 
     // C. Future Budget Logic
-    // Current Annual Spending (excluding savings/pretax to allow fair comparison)
     const currentAnnualSpend = expenses.reduce((sum, e) => {
         if (e.isPreTax || e.type === 'savings') return sum; 
         return sum + getAnnualAmount(e.amount, e.frequency);
@@ -352,13 +358,11 @@ export default function FireDashboard({ expenses, incomes, accounts, updateAccou
     let futureAnnualSpend = 0;
     
     expenses.forEach(e => {
-        // Don't include savings/investments in spending needs
         if (e.type === 'savings' || e.isPreTax) return;
 
         const mod = modifiers[e.id];
         if (mod?.excluded) return; 
 
-        // Amount logic handled by modifier (Annual Cents)
         const amount = mod?.amount !== undefined ? mod.amount : getAnnualAmount(e.amount, e.frequency);
         
         if (fireMode === 'lean' && !e.isEssential) return; 
@@ -376,13 +380,13 @@ export default function FireDashboard({ expenses, incomes, accounts, updateAccou
     return { investedAssets, totalAnnualContribution, contributionBuckets, contributionSources, currentAnnualSpend, futureAnnualSpend, fiNumber };
   }, [accounts, expenses, modifiers, customExpenses, fireMode, config]);
 
-  // --- PROJECTION ENGINE (With Fallback) ---
+  // --- PROJECTION ENGINE ---
   const projection = useMemo(() => {
     const data = [];
     let balance = financialData.investedAssets;
     let coastBalance = financialData.investedAssets;
     const realReturn = (config.returnRate - config.inflation) / 100;
-    const yearlyContribution = financialData.totalAnnualContribution; // Uses strict contribution
+    const yearlyContribution = financialData.totalAnnualContribution;
     const target = financialData.fiNumber;
 
     let hitFreedom = false;
@@ -409,7 +413,6 @@ export default function FireDashboard({ expenses, incomes, accounts, updateAccou
       if (balance > (target * 4) && i > 15) break; 
     }
 
-    // Fallback Math
     if (!hitCoast && target > coastBalance && realReturn > 0 && financialData.investedAssets > 0) {
         const yearsNeeded = Math.log(target / financialData.investedAssets) / Math.log(1 + realReturn);
         const calcAge = currentAge + Math.ceil(yearsNeeded);
@@ -422,6 +425,78 @@ export default function FireDashboard({ expenses, incomes, accounts, updateAccou
 
     return { data, hitFreedom, hitCoast };
   }, [financialData, config, currentAge]);
+
+  // --- PLANNER (GAP ANALYSIS - REFINED) ---
+  const planner = useMemo(() => {
+    // 1. Get Projected Balance at Target Age (from Chart Data)
+    const targetData = projection.data.find(d => d.age === targetAge);
+    
+    const projectedBalanceCents = targetData ? (targetData.balance * 100) : 0; 
+    const targetAmount = financialData.fiNumber;
+    
+    // Strict comparison matching the visual chart lines
+    const isOnTrack = projectedBalanceCents >= targetAmount;
+
+    // 2. Calculate Gap Variables
+    // Variable A: "Shortfall Amount" (Assets needed - Assets Projected)
+    const shortfall = Math.max(0, targetAmount - projectedBalanceCents);
+
+    // Variable B: "Extra Savings Needed" to cover shortfall (Option A)
+    // PMT = Shortfall * r / ((1+r)^n - 1)
+    let savingsGapMonthly = 0;
+    const yearsToTarget = Math.max(1, targetAge - currentAge);
+    const realReturn = (config.returnRate - config.inflation) / 100;
+    const compoundFactor = Math.pow(1 + realReturn, yearsToTarget) - 1;
+
+    if (realReturn === 0) {
+        savingsGapMonthly = (shortfall / yearsToTarget) / 12;
+    } else {
+        if (compoundFactor > 0) {
+            const annualCatchUp = shortfall * (realReturn / compoundFactor);
+            savingsGapMonthly = annualCatchUp / 12;
+        }
+    }
+
+    // Variable C: "Budget Reduction Needed" to cover shortfall (Option B)
+    // Reduce Future Spend so that NewTarget = ProjectedBalance
+    // NewTarget = (FutureSpend - Cut) / SWR
+    // ProjectedBalance = (FutureSpend - Cut) / SWR
+    // ProjectedBalance * SWR = FutureSpend - Cut
+    // Cut = FutureSpend - (ProjectedBalance * SWR)
+    
+    const swr = config.withdrawalRate / 100;
+    const maxSustainableSpend = projectedBalanceCents * swr;
+    // Current Planned Spend
+    const currentPlannedSpend = financialData.futureAnnualSpend;
+    
+    const annualExpenseCut = Math.max(0, currentPlannedSpend - maxSustainableSpend);
+    const expenseGapMonthly = annualExpenseCut / 12;
+
+    return { isOnTrack, savingsGapMonthly, expenseGapMonthly };
+
+  }, [projection.data, financialData.fiNumber, financialData.futureAnnualSpend, targetAge, currentAge, config]);
+
+  // --- BLENDING LOGIC (THE MIXER) ---
+  const mixValues = useMemo(() => {
+     if (planner.isOnTrack) return { save: 0, cut: 0 };
+
+     // SLIDER LOGIC:
+     // 0% Mix = 100% Cuts (Option B)
+     // 100% Mix = 100% Savings (Option A)
+     
+     // To blend, we need to cover the "Shortfall".
+     // Let 'p' be percent covered by savings (mixPercent / 100).
+     // Savings Target = p * (Total Savings Gap)
+     // Remaining Gap for Cuts = (1-p) * (Total Expense Gap)
+     // *Critically*: If I save 50% of the gap, the expense gap shrinks linearly 
+     // because every dollar saved increases the Projected Balance, reducing the gap needed to be cut.
+     
+     const savePortion = (mixPercent / 100) * planner.savingsGapMonthly;
+     const cutPortion = (1 - (mixPercent / 100)) * planner.expenseGapMonthly;
+
+     return { save: savePortion, cut: cutPortion };
+  }, [planner, mixPercent]);
+
 
   const handleModify = (id, amount) => {
       setModifiers(prev => ({ ...prev, [id]: { ...prev[id], amount } }));
@@ -444,7 +519,7 @@ export default function FireDashboard({ expenses, incomes, accounts, updateAccou
   };
 
   return (
-    <div className="space-y-8 animate-in fade-in duration-500">
+    <div className="space-y-8 animate-in fade-in duration-500 pb-20">
       
       {/* HEADER CONTROLS */}
       <div className="flex justify-end">
@@ -494,9 +569,91 @@ export default function FireDashboard({ expenses, incomes, accounts, updateAccou
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
           
-          {/* FLIGHT DECK */}
+          {/* LEFT COLUMN: RETIREMENT PLANNER + CHART + SLIDERS */}
           <div className="lg:col-span-2 space-y-6">
-              <div className="bg-white dark:bg-slate-900 p-6 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-sm h-[400px]">
+              
+              {/* RETIREMENT PLANNER (NEW & IMPROVED) */}
+              <div className="bg-white dark:bg-slate-900 p-6 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-sm">
+                  <div className="flex items-center gap-2 mb-6 border-b border-slate-100 dark:border-slate-800 pb-4">
+                      <Target className="text-indigo-500" />
+                      <h3 className="font-bold text-lg text-slate-800 dark:text-white">Retirement Planner</h3>
+                      <div className="ml-auto text-xs font-bold bg-indigo-50 text-indigo-600 px-3 py-1 rounded-full dark:bg-indigo-900/30 dark:text-indigo-300">
+                          Goal: Age {targetAge}
+                      </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                      {/* Control: Target Age */}
+                      <div className="space-y-4">
+                          <div>
+                              <div className="flex justify-between text-xs font-bold text-slate-500 mb-2">
+                                  <span>Target Retirement Age</span>
+                                  <span>{targetAge}</span>
+                              </div>
+                              <input 
+                                  type="range" min={currentAge + 1} max="80" step="1" 
+                                  value={targetAge} 
+                                  onChange={(e) => setTargetAge(Number(e.target.value))}
+                                  className="w-full h-2 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-600"
+                              />
+                              <div className="flex justify-between text-[10px] text-slate-400 mt-1">
+                                  <span>Now ({currentAge})</span>
+                                  <span>80</span>
+                              </div>
+                          </div>
+                          
+                          {/* Gap Status */}
+                          <div className={`p-4 rounded-xl border flex flex-col justify-center h-32 ${planner.isOnTrack ? 'bg-emerald-50 border-emerald-200 dark:bg-emerald-900/10 dark:border-emerald-800' : 'bg-orange-50 border-orange-200 dark:bg-orange-900/10 dark:border-orange-800'}`}>
+                             {planner.isOnTrack ? (
+                                 <div className="text-center">
+                                     <div className="flex justify-center mb-1"><ShieldCheck size={32} className="text-emerald-500"/></div>
+                                     <div className="font-bold text-emerald-700 dark:text-emerald-400">On Track!</div>
+                                     <p className="text-[10px] text-emerald-600 dark:text-emerald-500 mt-1">Projected to retire before {targetAge}.</p>
+                                 </div>
+                             ) : (
+                                 <div className="text-center">
+                                     <div className="flex justify-center mb-1"><AlertTriangle size={32} className="text-orange-500"/></div>
+                                     <div className="font-bold text-orange-700 dark:text-orange-400">Shortfall Detected</div>
+                                     <p className="text-[10px] text-orange-600 dark:text-orange-500 mt-1">Use the slider below to fix.</p>
+                                 </div>
+                             )}
+                          </div>
+                      </div>
+
+                      {/* BLENDER CONTROLS (NEW) */}
+                      <div className="space-y-3">
+                          <h4 className="text-xs font-bold text-slate-400 uppercase flex items-center gap-2"><Sliders size={12}/> Strategy Mixer</h4>
+                          
+                          {/* The Mix Slider */}
+                          <div className={`p-4 rounded-xl border ${planner.isOnTrack ? 'opacity-50 pointer-events-none' : 'bg-slate-50 dark:bg-slate-800 border-slate-200 dark:border-slate-700'}`}>
+                               <div className="flex justify-between text-[10px] font-bold text-slate-500 uppercase mb-2">
+                                   <span>Cut Future Expenses</span>
+                                   <span>Save More Now</span>
+                               </div>
+                               <input 
+                                  type="range" min="0" max="100" step="5" 
+                                  value={mixPercent} 
+                                  onChange={(e) => setMixPercent(Number(e.target.value))}
+                                  className="w-full h-2 bg-gradient-to-r from-purple-500 to-indigo-500 rounded-lg appearance-none cursor-pointer"
+                                  disabled={planner.isOnTrack}
+                               />
+                               <div className="mt-4 space-y-2">
+                                   <div className="flex justify-between items-center bg-white dark:bg-slate-900 p-2 rounded-lg border border-indigo-100 dark:border-indigo-900/50">
+                                       <span className="text-[10px] text-indigo-600 dark:text-indigo-400 font-bold">Increase Current Savings</span>
+                                       <span className="text-sm font-black text-slate-800 dark:text-white">+{Money.format(mixValues.save)}<span className="text-[9px] text-slate-400 font-normal">/mo</span></span>
+                                   </div>
+                                   <div className="flex justify-between items-center bg-white dark:bg-slate-900 p-2 rounded-lg border border-purple-100 dark:border-purple-900/50">
+                                       <span className="text-[10px] text-purple-600 dark:text-purple-400 font-bold">Reduce Future Budget</span>
+                                       <span className="text-sm font-black text-slate-800 dark:text-white">-{Money.format(mixValues.cut)}<span className="text-[9px] text-slate-400 font-normal">/mo</span></span>
+                                   </div>
+                               </div>
+                          </div>
+                      </div>
+                  </div>
+              </div>
+
+              {/* CHART */}
+              <div className="bg-white dark:bg-slate-900 p-6 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-sm h-[350px]">
                   <div className="flex justify-between items-center mb-6">
                       <h3 className="font-bold text-slate-900 dark:text-white flex items-center gap-2"><Activity size={18}/> Projection</h3>
                       <div className="flex bg-slate-100 dark:bg-slate-800 p-1 rounded-lg">
@@ -521,6 +678,8 @@ export default function FireDashboard({ expenses, incomes, accounts, updateAccou
                           <Line type="step" dataKey="target" stroke="#f59e0b" strokeWidth={2} dot={false} name="FI Target" strokeDasharray="5 5" />
                           <Line type="monotone" dataKey="coast" stroke="#6366f1" strokeWidth={2} dot={false} name="Coast FIRE" strokeOpacity={0.6} />
                           <Area type="monotone" dataKey="balance" stroke="#10b981" strokeWidth={3} fill="url(#colorBal)" name="Projected Portfolio" />
+                          {/* Target Age Line */}
+                          <ReferenceLine x={targetAge} stroke="#6366f1" strokeDasharray="3 3" label={{ value: 'Goal', position: 'insideTopLeft', fontSize: 10, fill: '#6366f1', angle: -90 }} />
                       </ComposedChart>
                   </ResponsiveContainer>
               </div>
@@ -584,9 +743,9 @@ export default function FireDashboard({ expenses, incomes, accounts, updateAccou
               </div>
           </div>
 
-          {/* BUDGET BUILDER */}
+          {/* RIGHT COLUMN: BUDGET BUILDER */}
           <div className="space-y-6">
-              <div className="bg-white dark:bg-slate-900 p-6 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-sm flex flex-col h-full max-h-[800px]">
+              <div className="bg-white dark:bg-slate-900 p-6 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-sm flex flex-col h-full max-h-[1000px]">
                   <div className="mb-4">
                       <h3 className="font-bold text-slate-900 dark:text-white flex items-center gap-2"><Coffee size={18}/> Future Budget</h3>
                       <p className="text-xs text-slate-400 mt-1">Adjust current expenses for retirement reality.</p>
@@ -627,11 +786,13 @@ export default function FireDashboard({ expenses, incomes, accounts, updateAccou
                  updateFireSettings({ 
                     returnRate: val,
                     currentAge, 
+                    targetAge,
                     inflation: config.inflation,
                     withdrawalRate: config.withdrawalRate,
                     fireMode,
                     modifiers,
-                    customExpenses
+                    customExpenses,
+                    mixPercent
                  });
                  setIsDirty(false); // Reset dirty since we just saved
               }

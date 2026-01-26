@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Check, DollarSign, ArrowRight, X, Sparkles, Building2, CheckCircle2, ArrowRightLeft, Bot, AlertTriangle, MinusCircle, ChevronDown, ChevronUp, PlusCircle, ArrowDownRight, Info, Calendar, Calculator } from 'lucide-react';
+import { Check, DollarSign, ArrowRight, X, Sparkles, Building2, CheckCircle2, ArrowRightLeft, Bot, AlertTriangle, MinusCircle, ChevronDown, ChevronUp, PlusCircle, ArrowDownRight, Info, Calendar, Calculator, Settings2, ToggleLeft, ToggleRight, Clock } from 'lucide-react';
 import { Money, getPreviousDateStr, getTodayStr, getAnnualAmount, getNextDateStr } from '../../lib/finance';
 import { MoneyInput } from '../ui/Forms'; 
 
@@ -7,7 +7,6 @@ import { MoneyInput } from '../ui/Forms';
 const getPaydateStrings = (startStr, endStr, payDateStr, payFreq) => {
     if (!startStr || !endStr || !payDateStr) return [];
     
-    // Convert to comparable integers (YYYYMMDD) or strict comparisons to avoid timezones
     const toDate = (s) => {
         const [y, m, d] = s.split('-').map(Number);
         return new Date(y, m - 1, d);
@@ -47,17 +46,14 @@ const getPaydateStrings = (startStr, endStr, payDateStr, payFreq) => {
     const dates = [];
     safety = 0;
     
-    // We compare strict Date objects at 00:00:00
     while (currentPay <= end && safety < 1000) {
         if (currentPay >= start) {
-            // Format back to YYYY-MM-DD
             const y = currentPay.getFullYear();
             const m = String(currentPay.getMonth() + 1).padStart(2, '0');
             const d = String(currentPay.getDate()).padStart(2, '0');
             dates.push(`${y}-${m}-${d}`);
         }
         
-        // Advance
         switch (payFreq) {
             case 'Weekly': currentPay.setDate(currentPay.getDate() + 7); break;
             case 'Biweekly': currentPay.setDate(currentPay.getDate() + 14); break;
@@ -76,9 +72,16 @@ const PaydayWizard = ({ isOpen, onClose, income, expenses, updateExpense, accoun
   const [suggestions, setSuggestions] = useState({});
   const [transfers, setTransfers] = useState([]);
   const [auditBalances, setAuditBalances] = useState({});
+  
+  // New State for Offsets & Transfer Status
+  const [potentialOffsets, setPotentialOffsets] = useState([]);
+  const [ignoredOffsetIds, setIgnoredOffsetIds] = useState(new Set());
+
+  // UI State
   const [expandedTransfer, setExpandedTransfer] = useState(null);
   const [infoItem, setInfoItem] = useState(null); 
 
+  // 1. INITIALIZE WIZARD
   useEffect(() => {
     if (isOpen && income) {
       setStep('confirm'); 
@@ -87,6 +90,8 @@ const PaydayWizard = ({ isOpen, onClose, income, expenses, updateExpense, accoun
       setAuditBalances({});
       setExpandedTransfer(null);
       setInfoItem(null);
+      setIgnoredOffsetIds(new Set());
+      setPotentialOffsets([]);
       
       const newAllocations = {};
       const newSuggestions = {};
@@ -94,22 +99,22 @@ const PaydayWizard = ({ isOpen, onClose, income, expenses, updateExpense, accoun
       const primaryIncome = incomes.find(i => i.isPrimary) || incomes[0] || income;
       const refFreq = primaryIncome.frequency;
       const refPayDate = primaryIncome.nextDate || getTodayStr();
-      const annualPaychecks = getAnnualAmount(1, refFreq);
       const todayStr = getTodayStr();
       
       expenses.forEach(e => {
+        // --- FILTER: EXCLUDE FROM PAYDAY ---
         if (e.splitConfig?.isOwedOnly) return;
+        if (e.excludeFromPayday) return; 
         
-        // --- LOGIC: Paid Bill Projection ---
         let effectiveDueDate = e.date || e.dueDate || e.nextDate;
         let effectiveBalance = e.currentBalance || 0;
         let isProjected = false;
 
-        // If paid, force projection to NEXT cycle. Do not return early.
+        // Force projection if paid
         if (e.type === 'bill' && e.isPaid) {
             isProjected = true;
             effectiveDueDate = getNextDateStr(effectiveDueDate, e.frequency);
-            effectiveBalance = 0; // Assume 0 started for next cycle
+            effectiveBalance = 0; 
         }
 
         let share = 0;
@@ -125,12 +130,10 @@ const PaydayWizard = ({ isOpen, onClose, income, expenses, updateExpense, accoun
             let paydaysLeft = 1;
             
             if (effectiveDueDate) {
-                // If effective due date is somehow in the past (overdue), due now
                 if (effectiveDueDate < todayStr) {
                      paydaysLeft = 1;
                      futurePayDates = []; 
                 } else {
-                     // Get all paydates strictly between [Today, DueDate] inclusive
                      futurePayDates = getPaydateStrings(todayStr, effectiveDueDate, refPayDate, refFreq);
                      paydaysLeft = futurePayDates.length;
                      if (paydaysLeft < 1) paydaysLeft = 1; 
@@ -146,16 +149,14 @@ const PaydayWizard = ({ isOpen, onClose, income, expenses, updateExpense, accoun
                 window: `${todayStr} to ${effectiveDueDate}`
             };
         } 
-        // 2. VARIABLE / SAVINGS (Fixed Contribution based on FUTURE dates in cycle)
+        // 2. VARIABLE / SAVINGS (Fixed Contribution)
         else {
             let cyclePayDates = [];
             let divisor = 1;
 
             if (effectiveDueDate) {
                 const prevDue = getPreviousDateStr(effectiveDueDate, e.frequency);
-                // 1. Get ALL dates in this cycle [PrevDue, DueDate]
                 const allDates = getPaydateStrings(prevDue, effectiveDueDate, refPayDate, refFreq);
-                // 2. Filter: Only count dates >= Today
                 cyclePayDates = allDates.filter(d => d >= todayStr);
                 divisor = cyclePayDates.length;
                 if (divisor < 1) divisor = 1;
@@ -173,7 +174,6 @@ const PaydayWizard = ({ isOpen, onClose, income, expenses, updateExpense, accoun
             };
         }
 
-        // Cap at income amount
         share = Math.min(share, income.amount); 
         newAllocations[e.id] = share;
         newSuggestions[e.id] = { share, ...debugInfo, name: e.name, dueDate: effectiveDueDate }; 
@@ -183,48 +183,10 @@ const PaydayWizard = ({ isOpen, onClose, income, expenses, updateExpense, accoun
     }
   }, [isOpen, income, expenses, incomes]);
 
-  if (!isOpen || !income) return null;
-
-  const handleAllocate = (id, amount) => {
-    setAllocations(prev => ({ ...prev, [id]: Number(amount) }));
-  };
-
-  const totalAllocated = Object.values(allocations).reduce((sum, val) => sum + val, 0);
-  const remaining = incomeAmount - totalAllocated;
-
-  // --- TRANSFER LOGIC ---
-  const goToTransfers = () => {
-      const needs = {}; 
-      const baseBreakdowns = {}; 
-      
-      Object.entries(allocations).forEach(([expId, amt]) => {
-          if (amt <= 0) return;
-          const exp = expenses.find(e => e.id === expId);
-          if (!exp || !exp.accountId) return;
-
-          let targetAccountId = exp.accountId;
-          const account = accounts.find(a => a.id === targetAccountId);
-          let isRedirected = false;
-
-          if (account && account.type === 'credit' && account.linkedAccountId) {
-              targetAccountId = account.linkedAccountId;
-              isRedirected = true;
-          }
-
-          if (!needs[targetAccountId]) needs[targetAccountId] = 0;
-          if (!baseBreakdowns[targetAccountId]) baseBreakdowns[targetAccountId] = [];
-
-          needs[targetAccountId] += amt;
-          baseBreakdowns[targetAccountId].push({ 
-              name: exp.name, 
-              amount: amt, 
-              type: 'expense',
-              note: isRedirected ? `(for ${account.name})` : ''
-          });
-      });
-
+  // 2. IDENTIFY OFFSETS (Run once when moving to Transfers)
+  const identifyOffsets = () => {
       const payDateStr = income.nextDate || getTodayStr();
-      const incomeOffsets = {}; 
+      const candidates = [];
 
       incomes.forEach(inc => {
           if (inc.id === income.id) return; 
@@ -235,86 +197,198 @@ const PaydayWizard = ({ isOpen, onClose, income, expenses, updateExpense, accoun
           const diff = Math.abs(new Date(incDate) - new Date(payDateStr)) / (1000 * 60 * 60 * 24);
           
           if (isForced || diff <= 3) {
-              if (!incomeOffsets[inc.accountId]) incomeOffsets[inc.accountId] = 0;
-              incomeOffsets[inc.accountId] += inc.amount;
-              
-              if (!baseBreakdowns[inc.accountId]) baseBreakdowns[inc.accountId] = [];
-              baseBreakdowns[inc.accountId].push({
-                  name: `Less: ${inc.name}`,
-                  amount: -inc.amount,
-                  type: 'offset'
-              });
+              candidates.push(inc);
           }
       });
-
-      const depositAcctId = income.accountId;
-      const finalTransfers = []; 
-
-      Object.keys(needs).forEach(accId => {
-          const expenseTotal = needs[accId];
-          const offsetTotal = incomeOffsets[accId] || 0;
-          const netNeed = Math.max(0, expenseTotal - offsetTotal);
-          
-          if (netNeed > 0) {
-             let currentId = accId;
-             let amountToMove = netNeed;
-             let depth = 0;
-             while (currentId !== depositAcctId && depth < 5) {
-                 const targetAcc = accounts.find(a => a.id === currentId);
-                 if (!targetAcc) break;
-
-                 const sourceId = targetAcc.fundedFromId || depositAcctId;
-                 
-                 let transfer = finalTransfers.find(t => t.fromId === sourceId && t.toId === currentId);
-                 
-                 if (!transfer) {
-                     transfer = {
-                         fromId: sourceId,
-                         toId: currentId,
-                         amount: 0,
-                         targetName: targetAcc.name,
-                         sourceName: accounts.find(a => a.id === sourceId)?.name || 'Deposit',
-                         isAuto: targetAcc.autoConfig?.isAuto || false,
-                         autoAmount: targetAcc.autoConfig?.amount || 0,
-                         breakdown: [] 
-                     };
-                     finalTransfers.push(transfer);
-                 }
-
-                 transfer.amount += amountToMove;
-                 
-                 if (currentId === accId) {
-                     transfer.breakdown = [...transfer.breakdown, ...(baseBreakdowns[accId] || [])];
-                 } else {
-                     transfer.breakdown.push({
-                         name: `Flow to ${accounts.find(a => a.id === accId)?.name}`,
-                         amount: amountToMove,
-                         type: 'flow'
-                     });
-                 }
-
-                 currentId = sourceId;
-                 depth++;
-             }
-          }
-      });
-      
-      finalTransfers.forEach(t => {
-          t.drift = t.amount - t.autoAmount;
-      });
-
-      setTransfers(finalTransfers);
-      setStep(finalTransfers.length > 0 ? 'transfer' : 'audit'); 
-      
-      const initialAudit = {};
-      accounts.forEach(a => initialAudit[a.id] = a.currentBalance || 0);
-      setAuditBalances(initialAudit);
+      setPotentialOffsets(candidates);
   };
 
-  const toggleTransfer = (idx) => {
+  // 3. REACTIVE TRANSFER CALCULATION
+  useEffect(() => {
+    if (step !== 'transfer') return;
+
+    // A. Calculate Needs
+    const needs = {}; 
+    const baseBreakdowns = {}; 
+    
+    Object.entries(allocations).forEach(([expId, amt]) => {
+        if (amt <= 0) return;
+        const exp = expenses.find(e => e.id === expId);
+        if (!exp || !exp.accountId) return;
+
+        let targetAccountId = exp.accountId;
+        const account = accounts.find(a => a.id === targetAccountId);
+        let isRedirected = false;
+
+        if (account && account.type === 'credit' && account.linkedAccountId) {
+            targetAccountId = account.linkedAccountId;
+            isRedirected = true;
+        }
+
+        if (!needs[targetAccountId]) needs[targetAccountId] = 0;
+        if (!baseBreakdowns[targetAccountId]) baseBreakdowns[targetAccountId] = [];
+
+        needs[targetAccountId] += amt;
+        baseBreakdowns[targetAccountId].push({ 
+            name: exp.name, 
+            amount: amt, 
+            type: 'expense',
+            note: isRedirected ? `(for ${account.name})` : ''
+        });
+    });
+
+    // B. Apply Offsets (Active Only)
+    const incomeOffsets = {};
+    potentialOffsets.forEach(inc => {
+        if (ignoredOffsetIds.has(inc.id)) return; 
+
+        if (!incomeOffsets[inc.accountId]) incomeOffsets[inc.accountId] = 0;
+        incomeOffsets[inc.accountId] += inc.amount;
+
+        if (!baseBreakdowns[inc.accountId]) baseBreakdowns[inc.accountId] = [];
+        baseBreakdowns[inc.accountId].push({
+            name: `Less: ${inc.name}`,
+            amount: -inc.amount,
+            type: 'offset'
+        });
+    });
+
+    // C. Solve Daisy Chain
+    const depositAcctId = income.accountId;
+    const finalTransfers = []; 
+
+    Object.keys(needs).forEach(accId => {
+        const expenseTotal = needs[accId];
+        const offsetTotal = incomeOffsets[accId] || 0;
+        const netNeed = Math.max(0, expenseTotal - offsetTotal);
+
+        if (netNeed > 0) {
+           let currentId = accId;
+           let amountToMove = netNeed;
+           let depth = 0;
+
+           while (currentId !== depositAcctId && depth < 5) {
+               const targetAcc = accounts.find(a => a.id === currentId);
+               if (!targetAcc) break;
+
+               const sourceId = targetAcc.fundedFromId || depositAcctId;
+               let transfer = finalTransfers.find(t => t.fromId === sourceId && t.toId === currentId);
+               
+               if (!transfer) {
+                   transfer = {
+                       fromId: sourceId,
+                       toId: currentId,
+                       amount: 0,
+                       targetName: targetAcc.name,
+                       sourceName: accounts.find(a => a.id === sourceId)?.name || 'Deposit',
+                       isAuto: targetAcc.autoConfig?.isAuto || false,
+                       autoAmount: targetAcc.autoConfig?.amount || 0,
+                       breakdown: [],
+                       status: 'pending' // Default status
+                   };
+                   finalTransfers.push(transfer);
+               }
+
+               transfer.amount += amountToMove;
+               
+               if (currentId === accId) {
+                   transfer.breakdown = [...transfer.breakdown, ...(baseBreakdowns[accId] || [])];
+               } else {
+                   transfer.breakdown.push({
+                       name: `Flow to ${accounts.find(a => a.id === accId)?.name}`,
+                       amount: amountToMove,
+                       type: 'flow'
+                   });
+               }
+               currentId = sourceId;
+               depth++;
+           }
+        }
+    });
+    
+    // D. Calculate Drift/Excess
+    finalTransfers.forEach(t => {
+        t.drift = t.amount - t.autoAmount; 
+    });
+
+    // Merge with existing states to preserve status toggles if re-calc happens
+    setTransfers(prev => {
+        return finalTransfers.map(ft => {
+            const existing = prev.find(p => p.fromId === ft.fromId && p.toId === ft.toId);
+            if (existing) {
+                return { ...ft, status: existing.status };
+            }
+            return ft;
+        });
+    });
+
+  }, [step, allocations, potentialOffsets, ignoredOffsetIds, accounts, expenses, income?.accountId]);
+
+
+  if (!isOpen || !income) return null;
+
+  const handleAllocate = (id, amount) => {
+    setAllocations(prev => ({ ...prev, [id]: Number(amount) }));
+  };
+
+  const totalAllocated = Object.values(allocations).reduce((sum, val) => sum + val, 0);
+  const remaining = incomeAmount - totalAllocated;
+
+  const goToTransfers = () => {
+      identifyOffsets();
+      setStep('transfer');
+  };
+
+  const toggleOffset = (id) => {
+      const newSet = new Set(ignoredOffsetIds);
+      if (newSet.has(id)) newSet.delete(id);
+      else newSet.add(id);
+      setIgnoredOffsetIds(newSet);
+  };
+
+  const cycleTransferStatus = (idx) => {
       const newT = [...transfers];
-      newT[idx].isDone = !newT[idx].isDone;
+      const modes = ['pending', 'cleared', 'skipped'];
+      const currentIdx = modes.indexOf(newT[idx].status);
+      newT[idx].status = modes[(currentIdx + 1) % modes.length];
       setTransfers(newT);
+  };
+
+  const goToAudit = () => {
+      // Calculate Projected Balances based on Current + Deposit + Transfers
+      const projected = {};
+      accounts.forEach(a => projected[a.id] = a.currentBalance || 0);
+      
+      // 1. Add Payday Income
+      if(income.accountId) {
+          projected[income.accountId] = (projected[income.accountId] || 0) + incomeAmount;
+      }
+
+      // 2. Apply Planned Transfers
+      transfers.forEach(t => {
+          if (t.status === 'skipped') return; // Skip logic
+
+          if (t.status === 'cleared') {
+              // Money moved fully: Source Down, Target Up
+              projected[t.fromId] = (projected[t.fromId] || 0) - t.amount;
+              projected[t.toId] = (projected[t.toId] || 0) + t.amount;
+          } 
+          // If Pending, DO NOTHING to targets. 
+          // However, if we want to be strict, if it's pending, it hasn't left the source bank yet. 
+          // So Audit = Current. 
+          // But user said "Should reflect as pending funds... in the audit page".
+          // If I initiated a transfer, my bank balance *might* show it deducted immediately or not.
+          // Let's assume standard behavior: 
+          // Pending = Deducted from Source (user sees it gone), Not yet at Target.
+          // So for Audit purposes, we deduct from source.
+          else if (t.status === 'pending') {
+              projected[t.fromId] = (projected[t.fromId] || 0) - t.amount;
+              // Do NOT add to target. It's in transit.
+          }
+      });
+
+      setAuditBalances(projected);
+      setStep('audit');
   };
 
   const handleAuditChange = (id, val) => {
@@ -323,27 +397,68 @@ const PaydayWizard = ({ isOpen, onClose, income, expenses, updateExpense, accoun
 
   const handleSkip = () => {
       setAllocations({});
-      const initialAudit = {};
-      accounts.forEach(a => initialAudit[a.id] = a.currentBalance || 0);
-      if (income.accountId) {
-          initialAudit[income.accountId] = (initialAudit[income.accountId] || 0) + incomeAmount;
-      }
-      setAuditBalances(initialAudit);
+      // Just project the income deposit
+      const projected = {};
+      accounts.forEach(a => projected[a.id] = a.currentBalance || 0);
+      if(income.accountId) projected[income.accountId] = (projected[income.accountId] || 0) + incomeAmount;
+      
+      setAuditBalances(projected);
       setStep('audit');
   };
 
   const executeUpdates = () => {
+    // 1. Prepare Deferred Allocations (Bucket updates attached to pending transfers)
+    const bucketAllocationsByAccount = {}; 
+    
+    // Group allocations by target account
     Object.entries(allocations).forEach(([expId, amount]) => {
-      if (amount > 0) {
-        updateExpense(expId, 'addedFunds', Number(amount));
-      }
+       const exp = expenses.find(e => e.id === expId);
+       if (!exp) return;
+       // Handle Credit Card redirection
+       let targetAccId = exp.accountId;
+       const acc = accounts.find(a => a.id === targetAccId);
+       if (acc && acc.type === 'credit' && acc.linkedAccountId) {
+           targetAccId = acc.linkedAccountId;
+       }
+
+       if (!bucketAllocationsByAccount[targetAccId]) bucketAllocationsByAccount[targetAccId] = {};
+       bucketAllocationsByAccount[targetAccId][expId] = amount;
     });
 
+    const pendingTransfersData = [];
+    
+    transfers.forEach(t => {
+        if (t.status === 'pending') {
+             // Grab allocations destined for this target account
+             const buckets = bucketAllocationsByAccount[t.toId] || {};
+             // Remove them from the "Immediate Update" list so we don't double count
+             delete bucketAllocationsByAccount[t.toId]; 
+             
+             pendingTransfersData.push({
+                 sourceId: t.fromId,
+                 targetId: t.toId,
+                 amount: t.amount,
+                 targetName: t.targetName,
+                 date: getTodayStr(),
+                 bucketAllocations: buckets // Attach the deferred bucket updates here
+             });
+        }
+    });
+
+    // 2. Execute Immediate Updates (Buckets NOT waiting on a pending transfer)
+    Object.values(bucketAllocationsByAccount).forEach(bucketMap => {
+       Object.entries(bucketMap).forEach(([expId, amt]) => {
+          updateExpense(expId, 'addedFunds', Number(amt));
+       });
+    });
+
+    // 3. Update Account Balances (Audit)
     Object.entries(auditBalances).forEach(([accId, bal]) => {
        updateAccount(accId, 'currentBalance', bal);
     });
 
-    onClose(true, income.id);
+    // 4. Pass Pending Transfers to App for creation
+    onClose(true, income.id, pendingTransfersData); 
   };
 
   return (
@@ -386,7 +501,6 @@ const PaydayWizard = ({ isOpen, onClose, income, expenses, updateExpense, accoun
                   <button onClick={() => setStep('allocate')} className="mx-auto flex items-center gap-2 bg-slate-900 dark:bg-white dark:text-slate-900 text-white px-8 py-3 rounded-xl font-bold hover:scale-105 transition-transform">
                     Start Sorting <ArrowRight size={18}/>
                   </button>
-                  
                   <button onClick={handleSkip} className="block mx-auto text-xs text-slate-500 hover:text-slate-800 dark:hover:text-white font-bold underline decoration-slate-300 underline-offset-4">
                     Deposit Only (Skip Allocations)
                   </button>
@@ -407,7 +521,8 @@ const PaydayWizard = ({ isOpen, onClose, income, expenses, updateExpense, accoun
                </div>
 
                <div className="space-y-4">
-                 {expenses.filter(e => !e.splitConfig?.isOwedOnly).map(exp => {
+                 {/* FIX: Explicitly check exclusions here */}
+                 {expenses.filter(e => !e.splitConfig?.isOwedOnly && !e.excludeFromPayday).map(exp => {
                     const current = allocations[exp.id] || 0;
                     const suggestion = suggestions[exp.id];
                     // Use effective due date
@@ -439,6 +554,7 @@ const PaydayWizard = ({ isOpen, onClose, income, expenses, updateExpense, accoun
                                     value={current / 100}
                                     onChange={(e) => handleAllocate(exp.id, Money.toCents(e.target.value))}
                                     onFocus={(e) => e.target.select()}
+                                    onWheel={(e) => e.target.blur()}
                                 />
                             </div>
                         </div>
@@ -450,26 +566,50 @@ const PaydayWizard = ({ isOpen, onClose, income, expenses, updateExpense, accoun
 
           {step === 'transfer' && (
              <div className="space-y-6">
+                
+                {/* OFFSET TOGGLE */}
+                {potentialOffsets.length > 0 && (
+                    <div className="bg-blue-50 dark:bg-blue-900/20 p-4 rounded-xl border border-blue-100 dark:border-blue-800">
+                         <h4 className="text-xs font-bold text-blue-800 dark:text-blue-300 uppercase mb-2 flex items-center gap-2"><Settings2 size={12}/> Confirm Offsets</h4>
+                         <div className="space-y-2">
+                             {potentialOffsets.map(inc => {
+                                 const isActive = !ignoredOffsetIds.has(inc.id);
+                                 return (
+                                    <div key={inc.id} onClick={() => toggleOffset(inc.id)} className={`flex items-center justify-between p-2 rounded-lg cursor-pointer transition-colors ${isActive ? 'bg-white dark:bg-slate-900 border border-blue-200 dark:border-blue-700' : 'bg-transparent border border-transparent opacity-60'}`}>
+                                        <div className="flex items-center gap-2">
+                                            {isActive ? <ToggleRight className="text-emerald-500"/> : <ToggleLeft className="text-slate-400"/>}
+                                            <span className="text-sm font-bold text-slate-700 dark:text-slate-300">{inc.name}</span>
+                                        </div>
+                                        <span className="text-sm font-mono text-slate-600 dark:text-slate-400">{Money.format(inc.amount)}</span>
+                                    </div>
+                                 );
+                             })}
+                         </div>
+                         <p className="text-[10px] text-blue-600 dark:text-blue-400 mt-2">Active offsets reduce the amount needed to be transferred.</p>
+                    </div>
+                )}
+
                 <div className="bg-indigo-50 dark:bg-indigo-900/20 p-4 rounded-xl border border-indigo-100 dark:border-indigo-800 flex items-start gap-3">
                     <ArrowRightLeft className="text-indigo-600 dark:text-indigo-400 mt-1" />
                     <div>
                         <h4 className="font-bold text-indigo-900 dark:text-indigo-300">Move Money</h4>
-                        <p className="text-xs text-indigo-700 dark:text-indigo-400 mt-1">Transfer these amounts. Click arrow to see breakdown.</p>
+                        <p className="text-xs text-indigo-700 dark:text-indigo-400 mt-1">Based on your allocations and active offsets.</p>
                     </div>
                 </div>
 
                 <div className="space-y-3">
                     {transfers.map((t, idx) => {
-                        // Calculate Subtotals
                         const expensesTotal = t.breakdown.filter(i => i.type === 'expense' || i.type === 'flow').reduce((sum, i) => sum + i.amount, 0);
                         const hasOffsets = t.breakdown.some(i => i.type === 'offset');
 
                         return (
-                            <div key={idx} className={`rounded-xl border transition-all ${t.isDone ? 'bg-emerald-50 border-emerald-200 opacity-60' : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800'}`}>
-                                <div className="flex items-center justify-between p-4 cursor-pointer" onClick={() => toggleTransfer(idx)}>
+                            <div key={idx} className={`rounded-xl border transition-all ${t.status === 'skipped' ? 'opacity-50 grayscale' : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800'}`}>
+                                <div className="flex items-center justify-between p-4 cursor-pointer" onClick={() => cycleTransferStatus(idx)}>
                                     <div className="flex items-center gap-4">
-                                        <div className={`w-6 h-6 rounded-full border-2 flex items-center justify-center ${t.isDone ? 'bg-emerald-500 border-emerald-500' : 'border-slate-300'}`}>
-                                            {t.isDone && <Check size={14} className="text-white"/>}
+                                        <div className={`w-8 h-8 rounded-full border-2 flex items-center justify-center transition-colors ${t.status === 'cleared' ? 'bg-emerald-500 border-emerald-500 text-white' : (t.status === 'pending' ? 'bg-amber-100 border-amber-400 text-amber-600' : 'bg-slate-100 border-slate-300 text-slate-400')}`}>
+                                            {t.status === 'cleared' && <Check size={16}/>}
+                                            {t.status === 'pending' && <Clock size={16}/>}
+                                            {t.status === 'skipped' && <X size={16}/>}
                                         </div>
                                         <div>
                                             <div className="flex items-center gap-2 text-xs font-bold text-slate-400 uppercase tracking-widest">
@@ -477,15 +617,21 @@ const PaydayWizard = ({ isOpen, onClose, income, expenses, updateExpense, accoun
                                             </div>
                                             <div className="font-bold text-slate-800 dark:text-white text-lg">{Money.format(t.amount)}</div>
                                             
+                                            {/* CONTEXT WARNINGS: DRIFT & EXCESS */}
                                             <div className="flex flex-wrap gap-2 mt-1">
+                                                <span className={`text-[10px] uppercase font-bold px-2 py-0.5 rounded-full ${t.status === 'cleared' ? 'bg-emerald-100 text-emerald-600' : (t.status === 'pending' ? 'bg-amber-100 text-amber-600' : 'bg-slate-100 text-slate-500')}`}>
+                                                    {t.status}
+                                                </span>
                                                 {t.isAuto ? (
                                                     t.drift > 0 ? (
-                                                        <span className="text-[10px] flex items-center gap-1 text-orange-600 bg-orange-100 px-2 py-0.5 rounded-full"><AlertTriangle size={10}/> Manual Drift: {Money.format(t.drift)}</span>
+                                                        <span className="text-[10px] flex items-center gap-1 text-orange-600 bg-orange-100 px-2 py-0.5 rounded-full"><AlertTriangle size={10}/> Shortfall: {Money.format(t.drift)}</span>
+                                                    ) : t.drift < 0 ? (
+                                                        <span className="text-[10px] flex items-center gap-1 text-emerald-600 bg-emerald-100 px-2 py-0.5 rounded-full"><PlusCircle size={10}/> Excess: {Money.format(Math.abs(t.drift))}</span>
                                                     ) : (
-                                                        <span className="text-[10px] flex items-center gap-1 text-emerald-600 bg-emerald-100 px-2 py-0.5 rounded-full"><Bot size={10}/> Auto-Transfer</span>
+                                                        <span className="text-[10px] flex items-center gap-1 text-blue-600 bg-blue-100 px-2 py-0.5 rounded-full"><Bot size={10}/> Auto-Match</span>
                                                     )
                                                 ) : (
-                                                    <span className="text-[10px] text-slate-400">Manual Transfer</span>
+                                                    <span className="text-[10px] text-slate-400">Manual</span>
                                                 )}
                                             </div>
                                         </div>
@@ -495,6 +641,7 @@ const PaydayWizard = ({ isOpen, onClose, income, expenses, updateExpense, accoun
                                     </button>
                                 </div>
 
+                                {/* DETAILED BREAKDOWN (THE RECEIPT) */}
                                 {expandedTransfer === idx && (
                                     <div className="px-4 pb-4 pt-0 text-xs animate-in slide-in-from-top-2">
                                         <div className="border-t border-slate-100 dark:border-slate-800 pt-3 space-y-1">
@@ -534,11 +681,11 @@ const PaydayWizard = ({ isOpen, onClose, income, expenses, updateExpense, accoun
                             </div>
                         );
                     })}
-                    {transfers.length === 0 && <div className="text-center text-slate-400 py-8">No manual transfers needed! Everything is covered by deposits or stays in the primary account.</div>}
+                    {transfers.length === 0 && <div className="text-center text-slate-400 py-8">No manual transfers needed!</div>}
                 </div>
 
                 <div className="flex justify-end pt-4">
-                    <button onClick={() => setStep('audit')} className="px-6 py-3 bg-slate-900 dark:bg-white dark:text-slate-900 text-white font-bold rounded-xl hover:opacity-90 flex items-center gap-2">
+                    <button onClick={goToAudit} className="px-6 py-3 bg-slate-900 dark:bg-white dark:text-slate-900 text-white font-bold rounded-xl hover:opacity-90 flex items-center gap-2">
                         Next: Verify Balances <ArrowRight size={18}/>
                     </button>
                 </div>
@@ -549,9 +696,9 @@ const PaydayWizard = ({ isOpen, onClose, income, expenses, updateExpense, accoun
              <div className="space-y-6">
                 <div className="flex items-center gap-2 mb-2">
                     <CheckCircle2 className="text-emerald-500"/>
-                    <h3 className="text-xl font-bold text-slate-800 dark:text-white">Final Check</h3>
+                    <h3 className="text-xl font-bold text-slate-800 dark:text-white">Projected Balances</h3>
                 </div>
-                <p className="text-sm text-slate-500">Update your account balances to match your banking app.</p>
+                <p className="text-sm text-slate-500">We've calculated these based on your current balance + income - planned transfers. Confirm they match your bank.</p>
                 
                 <div className="space-y-4 max-h-[400px] overflow-y-auto custom-scrollbar">
                     {accounts.filter(a => ['checking','savings'].includes(a.type)).map(acc => (
@@ -573,7 +720,7 @@ const PaydayWizard = ({ isOpen, onClose, income, expenses, updateExpense, accoun
 
         </div>
         
-        {/* INFO MODAL FOR BREAKDOWN */}
+        {/* INFO MODAL */}
         {infoItem && (
             <div className="absolute inset-0 bg-slate-900/90 backdrop-blur-sm z-50 flex items-center justify-center p-6 animate-in fade-in" onClick={() => setInfoItem(null)}>
                 <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl shadow-xl max-w-sm w-full border border-slate-200 dark:border-slate-800" onClick={e => e.stopPropagation()}>

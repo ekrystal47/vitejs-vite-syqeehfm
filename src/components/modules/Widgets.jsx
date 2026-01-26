@@ -19,59 +19,141 @@ const makeDateKey = (dateInput) => {
   return `${year}-${month}-${day}`;
 };
 
-// --- 0. GAME STATS WIDGET ---
+// --- BADGE CONFIGURATION ---
+const BADGE_DEFINITIONS = [
+    {
+        id: 'streak',
+        groupLabel: 'Consistency',
+        icon: Flame,
+        tiers: [
+            { id: 'streak_7', label: '7 Day Streak', color: 'text-orange-400', desc: 'Logged in 7 days in a row.', nextDesc: 'Reach 30 days.' },
+            { id: 'streak_30', label: '30 Day Streak', color: 'text-orange-500', desc: 'Logged in 30 days in a row.', nextDesc: 'Reach 100 days.' },
+            { id: 'streak_100', label: '100 Day Streak', color: 'text-red-600', desc: 'Logged in 100 days in a row.', nextDesc: 'Max Level!' },
+        ]
+    },
+    {
+        id: 'audit',
+        groupLabel: 'Auditor',
+        icon: ShieldCheck,
+        tiers: [
+            { id: 'audit_master', label: 'Audit Master', color: 'text-emerald-400', desc: 'Completed 10 Daily Audits.', nextDesc: 'Complete 50 Audits.' },
+            { id: 'audit_grand', label: 'Grandmaster', color: 'text-emerald-500', desc: 'Completed 50 Daily Audits.', nextDesc: 'Complete 100 Audits.' },
+            { id: 'audit_legend', label: 'Audit Legend', color: 'text-emerald-600', desc: 'Completed 100 Daily Audits.', nextDesc: 'Max Level!' },
+        ]
+    },
+    {
+        id: 'debt',
+        groupLabel: 'Slayer',
+        icon: Zap,
+        tiers: [
+            { id: 'debt_slayer', label: 'Debt Slayer', color: 'text-yellow-400', desc: 'Paid off 1 debt bucket.', nextDesc: 'Pay off 5 debts.' },
+            { id: 'debt_destroyer', label: 'Debt Destroyer', color: 'text-yellow-500', desc: 'Paid off 5 debt buckets.', nextDesc: 'Pay off 10 debts.' },
+            { id: 'debt_free', label: 'Freedom Fighter', color: 'text-yellow-600', desc: 'Paid off 10 debt buckets.', nextDesc: 'Max Level!' },
+        ]
+    },
+    {
+        id: 'zero',
+        groupLabel: 'Zero Hero',
+        icon: Medal,
+        tiers: [
+            { id: 'zero_hero', label: 'Zero Hero', color: 'text-blue-500', desc: 'Perfectly allocated budget ($0 left).', nextDesc: 'Maintain this monthly.' }
+        ]
+    },
+    {
+        id: 'savings',
+        groupLabel: 'Saver',
+        icon: PiggyBank,
+        tiers: [
+            { id: 'savings_star', label: 'Savings Star', color: 'text-teal-400', desc: 'Saved your first $1,000.', nextDesc: 'Reach $5,000 saved.' },
+            { id: 'savings_5k', label: 'Savings Pro', color: 'text-teal-500', desc: 'Accumulated $5,000 in savings.', nextDesc: 'Reach $10,000 saved.' },
+            { id: 'savings_10k', label: 'Savings Elite', color: 'text-teal-600', desc: 'Accumulated $10,000 in savings.', nextDesc: 'Reach $25,000 saved.' },
+            { id: 'savings_25k', label: 'Savings Master', color: 'text-purple-500', desc: 'Accumulated $25,000 in savings.', nextDesc: 'Max Level!' },
+        ]
+    }
+];
+
+// --- 0. GAME STATS WIDGET (COMPACT) ---
 export const GameStats = ({ stats }) => {
     const { level = 1, xp = 0, streak = 0, nextLevelXP = 1000 } = stats || {};
     const progress = Math.min(100, (xp / nextLevelXP) * 100);
 
     return (
-        <div className="bg-slate-900 text-white p-4 rounded-2xl shadow-lg relative overflow-hidden mb-6 border border-slate-700">
-            <div className="absolute top-0 right-0 p-4 opacity-10"><Trophy size={80}/></div>
+        <div className="bg-slate-900 text-white p-5 rounded-2xl shadow-lg relative overflow-hidden border border-slate-700 h-full flex flex-col justify-center min-h-[160px]">
+            {/* Reduced background icon size */}
+            <div className="absolute top-0 right-0 p-2 opacity-10"><Trophy size={80}/></div>
             <div className="flex items-center gap-4 relative z-10">
+                {/* Smaller Level Box */}
                 <div className="w-12 h-12 bg-amber-400 rounded-xl flex flex-col items-center justify-center shadow-lg shadow-amber-500/20">
                     <span className="text-[10px] font-bold text-amber-900 uppercase">Lvl</span>
                     <span className="text-xl font-black text-amber-900 leading-none">{level}</span>
                 </div>
-                <div className="flex-1">
+                <div className="flex-1 min-w-0">
                     <div className="flex justify-between text-xs font-bold mb-1 text-slate-300">
                         <span>Financial Rank</span>
                         <span>{xp} / {nextLevelXP} XP</span>
                     </div>
-                    <div className="h-3 w-full bg-slate-700 rounded-full overflow-hidden border border-slate-600">
+                    {/* Thinner Progress Bar */}
+                    <div className="h-2.5 w-full bg-slate-700 rounded-full overflow-hidden border border-slate-600">
                         <div className="h-full bg-gradient-to-r from-indigo-500 to-purple-500 transition-all duration-700 ease-out" style={{ width: `${progress}%` }}/>
                     </div>
                 </div>
                 <div className="flex flex-col items-center justify-center px-2">
                     <div className={`p-2 rounded-full ${streak > 0 ? 'bg-orange-500 text-white animate-pulse' : 'bg-slate-700 text-slate-400'}`}>
-                        <Flame size={20} fill={streak > 0 ? "currentColor" : "none"} />
+                        <Flame size={18} fill={streak > 0 ? "currentColor" : "none"} />
                     </div>
-                    <span className="text-[10px] font-bold mt-1 text-orange-100">{streak} Day Streak</span>
+                    <span className="text-[10px] font-bold mt-1 text-orange-100">{streak} Days</span>
                 </div>
             </div>
         </div>
     );
 };
 
-// --- 0.5 TROPHY CASE (NEW) ---
+// --- 0.5 TROPHY CASE (MULTI-LEVEL & TALLER) ---
 export const TrophyCase = ({ badges = [] }) => {
-    // Defines potential badges. We only show if unlocked or as silhouette.
-    const allBadges = [
-        { id: 'streak_7', label: '7 Day Streak', icon: Flame, color: 'text-orange-500', desc: 'Maintained consistency for a week.' },
-        { id: 'audit_master', label: 'Audit Master', icon: ShieldCheck, color: 'text-emerald-500', desc: 'Completed 10 Daily Audits.' },
-        { id: 'debt_slayer', label: 'Debt Slayer', icon: Zap, color: 'text-yellow-500', desc: 'Paid off a debt bucket.' },
-        { id: 'zero_hero', label: 'Zero Hero', icon: Medal, color: 'text-blue-500', desc: 'Allocated budget perfectly to $0.' },
-    ];
-
     return (
-        <div className="bg-white dark:bg-slate-900 p-4 rounded-2xl border border-slate-200 dark:border-slate-800 mb-6">
-            <h3 className="text-sm font-bold text-slate-500 uppercase tracking-widest mb-3 flex items-center gap-2"><Star size={14} className="text-amber-400" /> Trophy Case</h3>
-            <div className="grid grid-cols-4 gap-2">
-                {allBadges.map(badge => {
-                    const isUnlocked = badges.includes(badge.id);
+        <div className="bg-white dark:bg-slate-900 p-5 rounded-2xl border border-slate-200 dark:border-slate-800 h-full flex flex-col justify-center relative z-20 min-h-[160px]">
+            <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3 flex items-center gap-2"><Star size={14} className="text-amber-400" /> Trophy Case</h3>
+            <div className="grid grid-cols-5 gap-3">
+                {BADGE_DEFINITIONS.map(group => {
+                    // Find the highest unlocked tier
+                    let highestTier = null;
+                    
+                    for (let i = 0; i < group.tiers.length; i++) {
+                        if (badges.includes(group.tiers[i].id)) {
+                            highestTier = group.tiers[i];
+                        }
+                    }
+
+                    const isUnlocked = !!highestTier;
+                    const displayTier = highestTier || group.tiers[0]; // Show unlocked or the base silhouette
+
                     return (
-                        <div key={badge.id} className={`aspect-square rounded-xl flex flex-col items-center justify-center p-2 text-center border transition-all ${isUnlocked ? 'bg-slate-50 dark:bg-slate-800 border-slate-200 dark:border-slate-700' : 'bg-slate-50/50 dark:bg-slate-900 border-dashed border-slate-200 dark:border-slate-800 opacity-40 grayscale'}`}>
-                            <badge.icon size={24} className={`mb-1 ${isUnlocked ? badge.color : 'text-slate-400'}`} />
-                            <span className="text-[9px] font-bold text-slate-600 dark:text-slate-400 leading-tight">{badge.label}</span>
+                        <div key={group.id} className={`group relative rounded-xl flex flex-col items-center justify-center py-2 px-1 text-center border transition-all cursor-help ${isUnlocked ? 'bg-slate-50 dark:bg-slate-800 border-slate-200 dark:border-slate-700' : 'bg-slate-50/50 dark:bg-slate-950 border-dashed border-slate-200 dark:border-slate-800 opacity-40 grayscale'}`}>
+                            
+                            <group.icon size={20} className={`mb-1 ${isUnlocked ? displayTier.color : 'text-slate-400'}`} />
+                            <span className="text-[9px] font-bold text-slate-600 dark:text-slate-400 leading-none truncate w-full px-1">
+                                {displayTier.label}
+                            </span>
+
+                            {/* TOOLTIP */}
+                            <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-3 w-44 bg-slate-800 dark:bg-black text-white text-[10px] p-3 rounded-xl shadow-xl opacity-0 group-hover:opacity-100 transition-opacity duration-200 z-50 pointer-events-none transform translate-y-1 group-hover:translate-y-0">
+                                <p className={`font-bold mb-1 text-xs ${isUnlocked ? displayTier.color : 'text-slate-400'}`}>
+                                    {isUnlocked ? displayTier.label : 'Locked'}
+                                </p>
+                                <p className="text-slate-300 leading-snug mb-3 border-b border-slate-700 pb-2">
+                                    {isUnlocked ? displayTier.desc : displayTier.desc}
+                                </p>
+                                
+                                <div>
+                                    <p className="text-slate-500 uppercase text-[8px] font-bold mb-0.5">Next Goal</p>
+                                    <p className="text-white font-medium flex items-center gap-1">
+                                        {isUnlocked ? displayTier.nextDesc : "Unlock to see next level"}
+                                    </p>
+                                </div>
+                                
+                                {/* Tooltip Arrow */}
+                                <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-slate-800 dark:border-t-black"></div>
+                            </div>
                         </div>
                     );
                 })}
