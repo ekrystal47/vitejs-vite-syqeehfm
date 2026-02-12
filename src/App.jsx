@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { 
   LayoutDashboard, Wallet, Building2, Settings, LogOut, Sun, Moon, Menu, RefreshCw, 
   CheckCircle2, Sparkles, ShieldCheck, TrendingDown, Medal, CreditCard as CardIcon, 
-  Info, TrendingUp, PiggyBank, RotateCcw, Flame, CreditCard, Trash2, Activity, History, Zap, ArrowLeftRight, Check, FlaskConical, XCircle, PieChart, CalendarDays, Edit2, ExternalLink, Plus, ChevronUp, ChevronDown, Clock
+  Info, TrendingUp, PiggyBank, RotateCcw, Flame, CreditCard, Trash2, Activity, History, Zap, ArrowLeftRight, Check, FlaskConical, XCircle, PieChart, CalendarDays, Edit2, ExternalLink, Plus, ChevronUp, ChevronDown, Clock, Download
 } from 'lucide-react';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
 import { 
@@ -208,6 +208,50 @@ export default function App() {
       setSimData({ accounts: [], incomes: [], expenses: [], partners: [] });
       addToast("Simulation Ended. Data Reverted.", "success");
     }
+  };
+
+  // --- NEW: EXPORT TO CSV FUNCTIONALITY ---
+  const handleExportCSV = () => {
+    const headers = ['Category', 'Name', 'Amount', 'Frequency', 'Next Date', 'Status'];
+    const rows = [];
+
+    // 1. Incomes
+    incomes.forEach(i => {
+      rows.push([
+        'Income',
+        `"${i.name}"`, // Quote to handle commas in names
+        (i.amount / 100).toFixed(2),
+        i.frequency,
+        i.nextDate || '',
+        i.isPrimary ? 'Primary' : ''
+      ].join(','));
+    });
+
+    // 2. Expenses
+    expenses.forEach(e => {
+       const typeLabel = e.type ? e.type.charAt(0).toUpperCase() + e.type.slice(1) : 'Expense';
+       rows.push([
+        typeLabel,
+        `"${e.name}"`,
+        (e.amount / 100).toFixed(2),
+        e.frequency,
+        e.date || e.dueDate || e.nextDate || '',
+        e.isPaid ? 'Paid' : 'Unpaid'
+      ].join(','));
+    });
+
+    const csvContent = "data:text/csv;charset=utf-8," 
+      + headers.join(',') + "\n" 
+      + rows.join('\n');
+
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    link.setAttribute("href", encodedUri);
+    link.setAttribute("download", "financial_plan.csv");
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    addToast("Exported to CSV", "success");
   };
 
   useEffect(() => {
@@ -635,6 +679,10 @@ export default function App() {
             await updateDoc(doc(db, 'users', user.uid, 'settings', 'gameStats'), newStats);
             addToast(`Audit Complete! ${newStreak} Day Streak! 🔥`);
         } else {
+             // Still increment total audits even if streak doesn't update (e.g. multiple audits same day, though usually once/day)
+             // Actually, limiting audit count to once per day for "stats" is safer to prevent spamming
+             // But user asked for "Audit Master" which implies consistency.
+             // Let's only update if lastAudit !== today to prevent spamming stats.
              addToast("Audit Updated");
         }
         
@@ -1576,6 +1624,9 @@ export default function App() {
              <button onClick={() => setShowFundMover(true)} className="p-2 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg text-indigo-500" title="Move Funds"><ArrowLeftRight className="w-5 h-5" /></button>
              <button onClick={() => setShowQuickLog(true)} className="p-2 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg text-amber-500" title="Speed Log"><Zap className="w-5 h-5 fill-amber-500" /></button>
              <button onClick={() => setHistoryView({ isOpen: true, filterId: 'global' })} className="p-2 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg text-slate-500" title="Recent History"><History className="w-5 h-5" /></button>
+             {/* NEW EXPORT BUTTON */}
+             <button onClick={handleExportCSV} className="p-2 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg text-emerald-500" title="Export CSV"><Download className="w-5 h-5" /></button>
+             
              <div className="text-xs font-bold text-slate-400 uppercase tracking-widest hidden md:block border-l pl-3 ml-1 border-slate-200">Financial OS</div>
           </div>
         </header>
