@@ -243,11 +243,11 @@ const UnifiedEntryModal = ({ isOpen, onClose, onSave, accounts, expenses, initia
     setFormData(prev => {
       const newData = { ...prev, [field]: value };
       
-      if ((field === 'date' || field === 'dueDate' || field === 'targetDate') && newData.frequency) {
+      if ((field === 'date' || field === 'dueDate' || field === 'targetDate' || field === 'nextDate') && newData.frequency) {
         newData.startDate = getPreviousDateStr(value, newData.frequency);
       }
-      if (field === 'frequency' && (newData.date || newData.dueDate || newData.targetDate)) {
-        const refDate = newData.date || newData.dueDate || newData.targetDate;
+      if (field === 'frequency' && (newData.date || newData.dueDate || newData.targetDate || newData.nextDate)) {
+        const refDate = newData.date || newData.dueDate || newData.targetDate || newData.nextDate;
         newData.startDate = getPreviousDateStr(refDate, value);
       }
       return newData;
@@ -347,7 +347,6 @@ const UnifiedEntryModal = ({ isOpen, onClose, onSave, accounts, expenses, initia
 
   // --- RENDER: START SCREEN ---
   if (mode === 'start') {
-     // ... (Start screen remains unchanged)
      return (
       <div className="fixed inset-0 z-[130] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in">
         <div className="bg-white dark:bg-slate-900 w-full max-w-2xl rounded-3xl shadow-2xl p-8 border border-slate-200 dark:border-slate-800">
@@ -401,6 +400,45 @@ const UnifiedEntryModal = ({ isOpen, onClose, onSave, accounts, expenses, initia
             <input className="w-full p-3 bg-slate-50 dark:bg-slate-900 dark:text-white border border-slate-200 dark:border-slate-700 rounded-xl font-bold outline-none" placeholder="e.g. Rent, Groceries, Paycheck" value={formData.name || ''} onChange={e => handleChange('name', e.target.value)}/>
           </div>
 
+          {/* === INCOME MODE === */}
+          {mode === 'income' && (
+            <div className="space-y-4 animate-in fade-in">
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="text-[10px] font-bold text-slate-400 uppercase mb-1 block">Net Paycheck Amount</label>
+                  <MoneyInput value={formData.amount} onChange={e => handleChange('amount', e)} onWheel={(e) => e.target.blur()} />
+                </div>
+                <div>
+                  <label className="text-[10px] font-bold text-slate-400 uppercase mb-1 block">Pay Frequency</label>
+                  <FrequencySelect value={formData.frequency} onChange={e => handleChange('frequency', e.target.value)} />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="text-[10px] font-bold text-slate-400 uppercase mb-1 block">Deposit To</label>
+                  <select className="w-full p-3 bg-slate-50 dark:bg-slate-900 dark:text-white border border-slate-200 dark:border-slate-700 rounded-xl text-sm font-bold outline-none" value={formData.accountId || ''} onChange={e => handleChange('accountId', e.target.value)}>
+                    <option value="">Select Account...</option>
+                    {(accounts.filter(a => a.type === 'checking')||[]).map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <DateInput value={formData.nextDate || formData.date} onChange={e => { handleChange('nextDate', e.target.value); handleChange('date', e.target.value); }} label="Next Pay Date" />
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 p-3 bg-emerald-50 dark:bg-emerald-900/20 rounded-xl border border-emerald-100 dark:border-emerald-800">
+                <button 
+                  onClick={() => handleChange('isPrimary', !formData.isPrimary)} 
+                  className={`w-5 h-5 rounded border flex items-center justify-center ${formData.isPrimary ? 'bg-emerald-600 border-emerald-600' : 'bg-white border-emerald-200'}`}
+                >
+                  {formData.isPrimary && <Check size={12} className="text-white" />}
+                </button>
+                <span className="text-xs font-bold text-emerald-900 dark:text-indigo-300">Set as Primary Income (Used for allocations)</span>
+              </div>
+            </div>
+          )}
+
           {/* === SAVINGS MODE === */}
           {mode === 'savings' && (
             <>
@@ -427,7 +465,6 @@ const UnifiedEntryModal = ({ isOpen, onClose, onSave, accounts, expenses, initia
                           </select>
                       </div>
                       
-                      {/* FIX: STANDARDIZED EXCLUDE TOGGLE */}
                       <div className="flex flex-col justify-end pb-2">
                           <div className="flex items-center justify-between">
                               <label className="text-[9px] font-bold text-emerald-700 dark:text-emerald-400 uppercase">Deduct from Pay Source?</label>
@@ -533,7 +570,6 @@ const UnifiedEntryModal = ({ isOpen, onClose, onSave, accounts, expenses, initia
                  <div><label className="text-[10px] font-bold text-slate-400 uppercase mb-1 block">Frequency</label><FrequencySelect value={formData.frequency} onChange={e => handleChange('frequency', e.target.value)} /></div>
                </div>
                
-               {/* FIX: CONSISTENT EXCLUDE TOGGLE FOR EXPENSES */}
                <div className="flex justify-between items-center p-3 bg-slate-50 dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 mt-4">
                   <div>
                       <div className="font-bold text-slate-700 dark:text-slate-300 text-xs flex items-center gap-2"><Briefcase size={14} className="text-slate-400"/> Deduct from Pay Source?</div>
@@ -542,7 +578,6 @@ const UnifiedEntryModal = ({ isOpen, onClose, onSave, accounts, expenses, initia
                   <ToggleSwitch checked={formData.excludeFromPayday || false} onChange={v => handleChange('excludeFromPayday', v)} />
                </div>
 
-               {/* ... (Rest of expense fields - Fund Source, Split, etc) ... */}
                <div className="flex items-center justify-between mt-4 mb-2">
                    <label className="text-[10px] font-bold text-slate-400 uppercase">Fund Source</label>
                    <div className="flex bg-slate-100 dark:bg-slate-800 rounded-lg p-0.5">
@@ -653,7 +688,6 @@ const UnifiedEntryModal = ({ isOpen, onClose, onSave, accounts, expenses, initia
              </>
           )}
 
-          {/* ... (Account and Income Modes remain unchanged) ... */}
           {mode === 'account' && (
              <div className="space-y-3">
                <div><label className="text-[10px] font-bold text-slate-400 uppercase mb-1 block">Current Balance</label><MoneyInput value={formData.currentBalance} onChange={e => handleChange('currentBalance', e)} onWheel={(e) => e.target.blur()} /></div>

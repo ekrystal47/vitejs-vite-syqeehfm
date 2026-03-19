@@ -31,34 +31,41 @@ export default function TransactionHistoryModal({ isOpen, onClose, transactions,
            )}
 
            {filtered.map(t => {
-               const date = new Date(t.createdAt?.seconds * 1000);
+               const date = t.createdAt ? new Date(t.createdAt.seconds * 1000) : new Date();
                const isPositive = t.amount > 0;
-               const canUndo = (t.type === 'bill_paid' || t.type === 'expense_cleared') && onUndo;
+               
+               // NEW: Allow undo for any transaction that isn't voided and has an account/amount context
+               // This now covers transfers, discretionary logs, and general expenses.
+               const canUndo = t.type !== 'voided' && (t.accountId || t.sourceId) && t.amount !== 0 && onUndo;
 
                return (
-                   <div key={t.id} className="flex justify-between items-start p-4 bg-slate-50 dark:bg-slate-800 rounded-xl border border-slate-100 dark:border-slate-700 hover:border-slate-300 transition-colors group">
+                   <div key={t.id} className={`flex justify-between items-start p-4 rounded-xl border transition-colors group ${t.type === 'voided' ? 'bg-slate-50/50 dark:bg-slate-800/50 border-dashed border-slate-200 dark:border-slate-700 opacity-60' : 'bg-slate-50 dark:bg-slate-800 border-slate-100 dark:border-slate-700 hover:border-slate-300'}`}>
                        <div className="flex gap-3">
-                           <div className={`p-2 rounded-full mt-1 ${isPositive ? 'bg-emerald-100 text-emerald-600' : 'bg-red-100 text-red-600'}`}>
-                               {t.type === 'bill_paid' ? <Check size={14}/> : (isPositive ? <RotateCcw size={14}/> : <History size={14}/>)}
+                           <div className={`p-2 rounded-full mt-1 ${t.type === 'voided' ? 'bg-slate-200 text-slate-400' : (isPositive ? 'bg-emerald-100 text-emerald-600' : 'bg-red-100 text-red-600')}`}>
+                               {t.type === 'voided' ? <X size={14}/> : (t.type === 'bill_paid' ? <Check size={14}/> : (isPositive ? <RotateCcw size={14}/> : <History size={14}/>))}
                            </div>
                            <div>
-                               <div className="font-bold text-slate-800 dark:text-white text-sm">{t.itemName || 'Transaction'}</div>
+                               <div className={`font-bold text-sm ${t.type === 'voided' ? 'text-slate-400 line-through' : 'text-slate-800 dark:text-white'}`}>
+                                   {t.itemName || 'Transaction'} {t.type === 'voided' && '(Voided)'}
+                               </div>
                                <div className="text-xs text-slate-500">{t.description}</div>
-                               <div className="text-[10px] text-slate-400 mt-1 uppercase font-bold">{date.toLocaleDateString()} • {date.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</div>
+                               <div className="text-[10px] text-slate-400 mt-1 uppercase font-bold">
+                                   {date.toLocaleDateString()} • {date.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                               </div>
                            </div>
                        </div>
                        <div className="text-right">
-                           <div className={`font-mono font-bold ${isPositive ? 'text-emerald-600' : 'text-slate-800 dark:text-white'}`}>
+                           <div className={`font-mono font-bold ${t.type === 'voided' ? 'text-slate-400 line-through' : (isPositive ? 'text-emerald-600' : 'text-slate-800 dark:text-white')}`}>
                                {isPositive ? '+' : ''}{Money.format(t.amount)}
                            </div>
                            
-                           {/* UNDO BUTTON */}
+                           {/* UNIVERSAL UNDO BUTTON */}
                            {canUndo && (
                                <button 
                                    onClick={(e) => { e.stopPropagation(); onUndo(t.id, t); }} 
-                                   className="mt-2 text-[10px] font-bold text-red-400 hover:text-red-600 hover:underline flex items-center justify-end gap-1 w-full"
+                                   className="mt-2 text-[10px] font-bold text-red-400 hover:text-red-600 hover:underline flex items-center justify-end gap-1 w-full transition-all"
                                >
-                                   <RotateCcw size={10}/> Undo
+                                   <RotateCcw size={10}/> Undo Transaction
                                </button>
                            )}
                        </div>
@@ -66,7 +73,6 @@ export default function TransactionHistoryModal({ isOpen, onClose, transactions,
                );
            })}
         </div>
-
       </div>
     </div>
   );
