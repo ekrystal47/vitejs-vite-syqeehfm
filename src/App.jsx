@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { 
   LayoutDashboard, Wallet, Building2, Settings, LogOut, Sun, Moon, Menu, RefreshCw, 
   CheckCircle2, Sparkles, ShieldCheck, TrendingDown, Medal, CreditCard as CardIcon, 
-  Info, TrendingUp, PiggyBank, RotateCcw, Flame, CreditCard, Trash2, Activity, History, Zap, ArrowLeftRight, Check, FlaskConical, XCircle, PieChart, CalendarDays, Edit2, ExternalLink, Plus, ChevronUp, ChevronDown, Clock, Download
+  Info, TrendingUp, PiggyBank, RotateCcw, Flame, CreditCard, Trash2, Activity, History, Zap, ArrowLeftRight, Check, FlaskConical, XCircle, PieChart, CalendarDays, Edit2, ExternalLink, Plus, ChevronUp, ChevronDown, Clock, Download, AlertTriangle
 } from 'lucide-react';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
 import { 
@@ -34,7 +34,163 @@ import FundMoverModal from './components/modules/FundMoverModal';
 import BackupManager from './components/modules/BackupManager'; 
 import PayDebtModal from './components/modules/PayDebtModal'; 
 
-// --- NEW: Discretionary Log Modal Component ---
+// --- UPDATED: Drift Resolver Modal Component ---
+const DriftResolverModal = ({ isOpen, onClose, context, expenses, accounts, onResolve }) => {
+  const [selectedBucket, setSelectedBucket] = useState('');
+  const [amount, setAmount] = useState('');
+  const [localRemaining, setLocalRemaining] = useState(0);
+
+  useEffect(() => {
+    if (isOpen && context && context.freeAmount !== 0) {
+      const initial = Math.abs(context.freeAmount);
+      setLocalRemaining(initial);
+      setAmount((initial / 100).toFixed(2));
+      setSelectedBucket('');
+    }
+  }, [isOpen, context]);
+
+  if (!isOpen || !context) return null;
+
+  const isAllocating = context.freeAmount > 0;
+  
+  const linkedCreditCards = accounts.filter(a => a.type === 'credit' && a.linkedAccountId === context.account.id).map(a => a.id);
+
+  const eligibleBuckets = expenses.filter(e => {
+    if (e.deletedAt) return false;
+    
+    const isDirect = e.accountId === context.account.id;
+    const isLinkedSavings = e.linkedAccountIds && e.linkedAccountIds.includes(context.account.id);
+    const isCreditBacked = linkedCreditCards.includes(e.accountId);
+    const isDebtFunding = e.type === 'debt' && e.accountId === context.account.id;
+    const isCatchAll = !e.accountId && context.account.type === 'checking';
+
+    if (!isDirect && !isLinkedSavings && !isCreditBacked && !isDebtFunding && !isCatchAll) return false;
+    
+    return isAllocating || (e.currentBalance || 0) > 0;
+  }).sort((a,b) => (b.currentBalance || 0) - (a.currentBalance || 0));
+
+  const selectedItem = eligibleBuckets.find(b => b.id === selectedBucket);
+  
+  let maxAllowedCents = localRemaining;
+  if (!isAllocating && selectedItem) {
+      maxAllowedCents = Math.min(localRemaining, selectedItem.currentBalance || 0);
+  }
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    if (!selectedBucket || !amount) return;
+    
+    const cents = Money.toCents(amount);
+    if (cents <= 0) return;
+
+    onResolve(selectedBucket, cents, isAllocating);
+    
+    const newRemaining = localRemaining - cents;
+    if (newRemaining <= 0) {
+        onClose(); 
+    } else {
+        setLocalRemaining(newRemaining);
+        setAmount((newRemaining / 100).toFixed(2));
+        setSelectedBucket('');
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-[160] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-200">
+      <div className="bg-white dark:bg-slate-900 w-full max-w-md rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+        <div className="p-6 border-b border-slate-100 dark:border-slate-800 flex justify-between items-center shrink-0">
+          <h3 className="font-bold text-lg dark:text-white flex items-center gap-2">
+            <ArrowLeftRight className={isAllocating ? "text-emerald-500" : "text-red-500"} size={20}/> 
+            {isAllocating ? 'Allocate Free Funds' : 'Fix Overallocation'}
+          </h3>
+          <button onClick={onClose} className="p-2 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-full text-slate-400">
+            <XCircle size={20} />
+          </button>
+        </div>
+        
+        {eligibleBuckets.length === 0 ? (
+           <div className="p-6 text-center text-slate-500">
+              <AlertTriangle className="mx-auto mb-2 text-orange-500" size={32} />
+              No eligible buckets found in this account to adjust.
+           </div>
+        ) : (
+          <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0">
+            
+            <div className="p-6 pb-2 shrink-0">
+                <p className="text-sm text-slate-500 dark:text-slate-400">
+                  {isAllocating 
+                    ? `You have ` 
+                    : `Your ${context.account.name} is overallocated by `
+                  }
+                  <span className="font-bold text-slate-800 dark:text-white">{Money.format(localRemaining)}</span>
+                  {isAllocating ? ` unassigned. Choose where to put it:` : `. Reclaim funds from:`}
+                </p>
+            </div>
+
+            <div className="flex-1 overflow-y-auto px-6 pb-4 custom-scrollbar space-y-2">
+                {eligibleBuckets.map(b => (
+                    <div 
+                        key={b.id}
+                        onClick={() => {
+                            setSelectedBucket(b.id);
+                            let defaultCents = localRemaining;
+                            if (!isAllocating && (b.currentBalance || 0) < localRemaining) {
+                                defaultCents = b.currentBalance || 0;
+                            }
+                            setAmount((defaultCents / 100).toFixed(2));
+                        }}
+                        className={`p-3 rounded-xl border cursor-pointer flex justify-between items-center transition-all ${selectedBucket === b.id ? 'border-indigo-500 bg-indigo-50 dark:bg-indigo-900/20 shadow-sm' : 'border-slate-200 dark:border-slate-800 hover:border-indigo-300 dark:hover:border-indigo-700 bg-white dark:bg-slate-900'}`}
+                    >
+                        <div className="flex items-center gap-3">
+                            <div className={`w-4 h-4 rounded-full border flex items-center justify-center shrink-0 ${selectedBucket === b.id ? 'border-indigo-500 bg-indigo-500' : 'border-slate-300 dark:border-slate-600'}`}>
+                                {selectedBucket === b.id && <div className="w-1.5 h-1.5 bg-white rounded-full"></div>}
+                            </div>
+                            <div>
+                                <div className="font-bold text-slate-800 dark:text-white text-sm flex items-center">
+                                    {b.name}
+                                    {linkedCreditCards.includes(b.accountId) && <span className="ml-2 text-[9px] font-bold bg-slate-100 dark:bg-slate-800 text-slate-500 px-1.5 py-0.5 rounded uppercase">Card</span>}
+                                </div>
+                                <div className="text-[10px] text-slate-500 uppercase tracking-wider">{b.type}</div>
+                            </div>
+                        </div>
+                        <div className="text-right">
+                            <div className="font-bold text-slate-800 dark:text-white">{Money.format(b.currentBalance || 0)}</div>
+                            <div className="text-[10px] text-slate-400">Allocated</div>
+                        </div>
+                    </div>
+                ))}
+            </div>
+
+            <div className="p-6 pt-4 shrink-0 bg-white dark:bg-slate-900 border-t border-slate-100 dark:border-slate-800 mt-2">
+              <div className="mb-4">
+                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Amount to Move</label>
+                  <div className="relative">
+                    <span className="absolute left-4 top-3.5 text-slate-400 font-bold">$</span>
+                    <input 
+                      type="number" 
+                      step="0.01" 
+                      max={(maxAllowedCents / 100).toFixed(2)}
+                      value={amount}
+                      onChange={(e) => setAmount(e.target.value)}
+                      placeholder="0.00" 
+                      className="w-full p-3 pl-8 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 dark:text-white font-bold text-lg focus:ring-2 focus:ring-indigo-500 outline-none transition-all" 
+                      required 
+                      onWheel={(e) => e.target.blur()} 
+                    />
+                  </div>
+              </div>
+
+              <button type="submit" disabled={!selectedBucket} className="w-full py-4 text-white font-bold rounded-xl flex items-center justify-center gap-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed bg-slate-900 dark:bg-white dark:text-slate-900 hover:opacity-90">
+                <CheckCircle2 size={20} /> {isAllocating ? 'Assign Funds' : 'Reclaim Funds'}
+              </button>
+            </div>
+          </form>
+        )}
+      </div>
+    </div>
+  );
+};
+
 const DiscretionaryLogModal = ({ isOpen, onClose, onConfirm }) => {
   if (!isOpen) return null;
   const handleSubmit = (e) => {
@@ -93,6 +249,9 @@ export default function App() {
   const [transactions, setTransactions] = useState([]); 
   const [gameStats, setGameStats] = useState({ level: 1, xp: 0, streak: 0, lastAuditDate: '', nextLevelXP: 100, badges: [], totalAudits: 0, debtsCleared: 0 });
 
+  const [netWorthTimeframe, setNetWorthTimeframe] = useState(30);
+  const [cashFlowTimeframe, setCashFlowTimeframe] = useState(30);
+
   // --- NEW: FIRE SETTINGS PERSISTENCE ---
   const [fireSettings, setFireSettings] = useState(null);
 
@@ -118,6 +277,7 @@ export default function App() {
   const [confirmState, setConfirmState] = useState({ isOpen: false });
   const [showConfetti, setShowConfetti] = useState(false); 
   const [adjustItem, setAdjustItem] = useState(null); 
+  const [driftContext, setDriftContext] = useState(null); 
   
   // Feature Modals
   const [showQuickLog, setShowQuickLog] = useState(false);
@@ -144,7 +304,6 @@ export default function App() {
     setConfirmState({ isOpen: true, title, message, actionLabel, onConfirm: action });
   };
 
-  // --- GAME ENGINE ---
   const triggerConfetti = () => {
       setShowConfetti(true);
       if (navigator.vibrate) navigator.vibrate([100, 50, 100]); 
@@ -209,7 +368,6 @@ export default function App() {
     }
   };
 
-  // --- NEW: EXPORT TO CSV FUNCTIONALITY ---
   const handleExportCSV = () => {
     const headers = ['Category', 'Name', 'Amount', 'Frequency', 'Next Date', 'Status'];
     const rows = [];
@@ -379,7 +537,6 @@ export default function App() {
       setShowPayday(false);
       if (!completed) return; 
 
-      // 1. Advance Income Date
       let targetIncome = null;
       if (incomeId && incomeId.startsWith('virtual-')) {
           targetIncome = derivedIncomes.find(i => i.id === incomeId);
@@ -413,7 +570,6 @@ export default function App() {
           }
       }
 
-      // 2. Create Pending Transfers
       if (pendingTransfers.length > 0 && !isSimMode) {
           try {
               const batchPromises = pendingTransfers.map(t => 
@@ -577,7 +733,6 @@ export default function App() {
             createdAt: serverTimestamp(),
             amount: -amountCents,
             type: 'payment',
-            accountId: sourceAccountId,
             itemId: creditAccountId,
             itemName: `Paid ${creditDoc.data().name}`,
             description: `Payment from ${sourceDoc.data().name}`
@@ -626,6 +781,51 @@ export default function App() {
       });
       addToast("Funds Moved Successfully");
     } catch (e) { addToast("Transfer Failed: " + e.message, 'error'); }
+  };
+
+  const handleDriftAdjustment = async (bucketId, amountCents, isAllocating) => {
+    if (isSimMode) {
+        setSimData(prev => {
+            const newExpenses = prev.expenses.map(e => {
+                if (e.id === bucketId) {
+                    const current = e.currentBalance || 0;
+                    return { ...e, currentBalance: isAllocating ? current + amountCents : current - amountCents };
+                }
+                return e;
+            });
+            return { ...prev, expenses: newExpenses };
+        });
+        addToast("Budget Adjusted (Sim)");
+        return;
+    }
+
+    if (!user) return;
+    try {
+        await runTransaction(db, async (transaction) => {
+            const bucketRef = doc(db, 'users', user.uid, 'expenses', bucketId);
+            const bucketDoc = await transaction.get(bucketRef);
+            if (!bucketDoc.exists()) throw new Error("Bucket not found");
+            
+            const currentBal = bucketDoc.data().currentBalance || 0;
+            const newBal = isAllocating ? currentBal + amountCents : currentBal - amountCents;
+            
+            transaction.update(bucketRef, { currentBalance: newBal });
+            
+            const transRef = doc(collection(db, 'users', user.uid, 'transactions'));
+            transaction.set(transRef, {
+                createdAt: serverTimestamp(),
+                amount: isAllocating ? amountCents : -amountCents,
+                type: 'reallocation',
+                itemId: bucketId,
+                itemName: bucketDoc.data().name,
+                description: isAllocating ? 'Allocated Free Funds' : 'Reclaimed Over-allocated Funds'
+            });
+        });
+        addToast("Budget Adjusted");
+        awardXP(10);
+    } catch(e) {
+        addToast("Failed to adjust: " + e.message, "error");
+    }
   };
 
   const handleAuditComplete = async () => {
@@ -684,6 +884,7 @@ export default function App() {
 
     try {
       await runTransaction(db, async (transaction) => {
+        // CASE: PENDING TRANSFER
         if (item.type === 'transfer_pending' || item.originalType === 'transfer') {
              const sourceRef = doc(db, 'users', user.uid, 'accounts', item.sourceId);
              const targetRef = doc(db, 'users', user.uid, 'accounts', item.targetId);
@@ -698,6 +899,7 @@ export default function App() {
              
              transaction.update(sourceRef, { currentBalance: (sourceDoc.data().currentBalance || 0) - amount });
              transaction.update(targetRef, { currentBalance: (targetDoc.data().currentBalance || 0) + amount });
+             
              transaction.update(transRef, { type: 'transfer_cleared' });
 
              if (item.breakdown && Array.isArray(item.breakdown)) {
@@ -715,6 +917,7 @@ export default function App() {
              return;
         }
 
+        // CASE: STANDARD EXPENSE CLEARING
         const expenseRef = doc(db, 'users', user.uid, 'expenses', item.id);
         const expDoc = await transaction.get(expenseRef);
         if (!expDoc.exists()) throw new Error("Data missing");
@@ -789,7 +992,6 @@ export default function App() {
             createdAt: serverTimestamp(),
             amount: -amountToClear,
             type: 'expense_cleared',
-            accountId: realAccountId,
             itemId: item.id,
             itemName: expData.name,
             description: isCredit ? 'Cleared on Credit Card (Funds Moved)' : 'Cleared from Account'
@@ -834,41 +1036,79 @@ export default function App() {
       if (isSimMode) return;
       if (!user) return;
 
-      const { type, itemId: expenseId, amount: rawAmount } = transactionData;
-      // Capture whichever ID is available (supports transfers and standard logs)
-      const accountId = transactionData.accountId || transactionData.sourceId; 
-      const amount = Math.abs(rawAmount);
+      const type = transactionData.type;
+      const expenseId = transactionData.itemId;
+      const amount = Math.abs(transactionData.amount);
 
       try {
           if (type === 'bill_paid') {
-              await updateDoc(doc(db, 'users', user.uid, 'expenses', expenseId), { isPaid: false, isCleared: false });
+              await updateDoc(doc(db, 'users', user.uid, 'expenses', expenseId), {
+                  isPaid: false,
+                  isCleared: false
+              });
               await updateDoc(doc(db, 'users', user.uid, 'transactions', transId), { type: 'voided', voidedAt: serverTimestamp() });
-              addToast("Bill unmarked.");
+              addToast("Transaction Unmarked.");
           } 
-          else if (type === 'expense_cleared' || (accountId && amount)) {
+          else if (type === 'expense_cleared') {
               await runTransaction(db, async (transaction) => {
+                  const expenseRef = doc(db, 'users', user.uid, 'expenses', expenseId);
+                  const expDoc = await transaction.get(expenseRef);
+                  if (!expDoc.exists()) throw "Expense not found";
+                  const expData = expDoc.data();
+                  
+                  let accountId = expData.accountId;
+                  
+                  let parentDoc = null;
+                  let parentRef = null;
+                  if (!accountId && expData.parentExpenseId) {
+                      parentRef = doc(db, 'users', user.uid, 'expenses', expData.parentExpenseId);
+                      parentDoc = await transaction.get(parentRef);
+                      if (parentDoc.exists()) accountId = parentDoc.data().accountId;
+                  }
+
                   const accountRef = doc(db, 'users', user.uid, 'accounts', accountId);
                   const accDoc = await transaction.get(accountRef);
-                  if (!accDoc.exists()) throw "Account not found";
+                  const accData = accDoc.data();
                   
-                  const adjustment = rawAmount < 0 ? amount : -amount;
-                  transaction.update(accountRef, { currentBalance: (accDoc.data().currentBalance || 0) - adjustment });
+                  const isCredit = (accData.type || '').toLowerCase() === 'credit';
+                  let debtBucket = null;
+                  let debtRef = null;
+                  let debtDoc = null;
 
-                  if (expenseId && expenseId !== 'discretionary') {
-                      const expRef = doc(db, 'users', user.uid, 'expenses', expenseId);
-                      const expDoc = await transaction.get(expRef);
-                      if (expDoc.exists()) {
-                          transaction.update(expRef, { 
-                            currentBalance: (expDoc.data().currentBalance || 0) - adjustment,
-                            isPaid: type === 'expense_cleared' ? true : expDoc.data().isPaid,
-                            isCleared: false 
-                          });
+                  if (isCredit) {
+                      debtBucket = expenses.find(e => e.type === 'debt' && e.totalDebtBalance === accountId);
+                      if (debtBucket) {
+                          debtRef = doc(db, 'users', user.uid, 'expenses', debtBucket.id);
+                          debtDoc = await transaction.get(debtRef);
                       }
                   }
 
-                  transaction.update(doc(db, 'users', user.uid, 'transactions', transId), { type: 'voided', voidedAt: serverTimestamp() });
+                  transaction.update(accountRef, {
+                      currentBalance: (accData.currentBalance || 0) + amount
+                  });
+
+                  if (isCredit && debtBucket && debtDoc && debtDoc.exists()) {
+                      const current = debtDoc.data().currentBalance || 0;
+                      transaction.update(debtRef, { currentBalance: Math.max(0, current - amount) });
+                  }
+
+                  if (parentDoc && parentDoc.exists()) {
+                      transaction.update(parentRef, { 
+                          currentBalance: (parentDoc.data().currentBalance || 0) + amount 
+                      });
+                      transaction.update(expenseRef, { isPaid: true, isCleared: false });
+                  } else {
+                      transaction.update(expenseRef, {
+                          isPaid: true, 
+                          isCleared: false,
+                          currentBalance: (expData.currentBalance || 0) + amount 
+                      });
+                  }
+                  
+                  const transRef = doc(db, 'users', user.uid, 'transactions', transId);
+                  transaction.update(transRef, { type: 'voided', voidedAt: serverTimestamp() });
               });
-              addToast("Transaction undone & balance restored.");
+              addToast("Transaction Reverted to Pending.");
           }
       } catch (e) {
           addToast("Undo failed: " + e.message, 'error');
@@ -905,7 +1145,6 @@ export default function App() {
                 createdAt: serverTimestamp(),
                 amount: -amountCents,
                 type: 'payment',
-                accountId: bucket.accountId, // Source account
                 itemId: bucketId,
                 itemName: bucket.name,
                 description: `Payment Sent (Pending Clearance)`
@@ -943,7 +1182,6 @@ export default function App() {
                   createdAt: serverTimestamp(),
                   amount: -amount,
                   type: 'expense', 
-                  accountId: discretionaryAcc.id,
                   itemId: 'discretionary',
                   itemName: name,
                   description: 'Discretionary Spend'
@@ -1030,6 +1268,9 @@ export default function App() {
                 let amountToPay = exp.amount || 0;
                 if (customAmountStr) amountToPay = Money.toCents(customAmountStr);
                 
+                logAmount = -amountToPay; // Default
+                logType = 'bill_paid';    // Default
+
                 if (exp.type === 'bnpl') {
                     const currentPaid = exp.installmentsPaid || 0;
                     const total = exp.totalInstallments || 1;
@@ -1058,12 +1299,51 @@ export default function App() {
                         currentBalance: newBal,
                         pendingPayment: newPending
                     });
+                } else if (isCreditAccount) {
+                     // ** ARCHITECT CHANGE: INSTANT SHIFT CC BILLS **
+                     if (debtDoc && debtDoc.exists()) {
+                         debtBucketBal += amountToPay;
+                         transaction.update(debtRef, { currentBalance: debtBucketBal });
+                     } else if (accDoc && accDoc.exists()) {
+                         const backingId = accDoc.data().linkedAccountId || accounts.find(a => a.type === 'checking')?.id;
+                         const newDebtRef = doc(collection(db, 'users', user.uid, 'expenses'));
+                         transaction.set(newDebtRef, {
+                             name: `Pay ${accDoc.data().name}`,
+                             amount: 0,
+                             currentBalance: amountToPay,
+                             totalDebtBalance: accountId, 
+                             accountId: backingId, 
+                             type: 'debt',
+                             frequency: 'Monthly',
+                             createdAt: serverTimestamp(),
+                             uid: user.uid
+                         });
+                     }
+                     
+                     if (accDoc && accDoc.exists()) {
+                         newAccBal -= amountToPay;
+                         transaction.update(accRef, { currentBalance: newAccBal });
+                     }
+
+                     let nextDate = exp.date || exp.dueDate;
+                     if (exp.frequency && exp.frequency !== 'One-Time') {
+                         nextDate = getNextDateStr(nextDate, exp.frequency);
+                     }
+
+                     const updates = { 
+                         isPaid: false, 
+                         isCleared: false, 
+                         currentBalance: Math.max(0, currentBucketBal - amountToPay) 
+                     };
+                     if (exp.date) updates.date = nextDate;
+                     else updates.dueDate = nextDate;
+
+                     transaction.update(expRef, updates);
+
+                     logType = 'expense_cleared'; // Override default log type since it clears instantly
                 } else {
                     transaction.update(expRef, { isPaid: true, isCleared: false, currentBalance: amountToPay });
                 }
-
-                logAmount = -amountToPay;
-                logType = 'bill_paid';
              } 
              else {
                  transaction.update(expRef, { isPaid: false, isCleared: false });
@@ -1075,7 +1355,6 @@ export default function App() {
                  createdAt: serverTimestamp(),
                  amount: logAmount,
                  type: logType,
-                 accountId: accountId,
                  itemId: id,
                  itemName: exp.name,
                  description: field === 'spent' && isCreditAccount ? 'Spent on Credit (Funds Reserved)' : 'Transaction Logged'
@@ -1114,7 +1393,6 @@ export default function App() {
     await updateDoc(doc(db, 'users', user.uid, 'accounts', id), { [field]: value });
   };
 
-  // --- CALCULATIONS ---
   const totalDebt = useMemo(() => {
     let debt = 0;
     accounts.forEach(a => {
@@ -1152,7 +1430,7 @@ export default function App() {
          allocatedVal = Math.max(0, totalInBucket - pendingVal);
       } 
       else {
-          allocatedVal = totalInBucket;
+         allocatedVal = totalInBucket;
       }
 
       if (pendingVal > 0) {
@@ -1268,7 +1546,6 @@ export default function App() {
     return totalSafe;
   }, [accounts, transferStrategy]);
 
-  // --- GAME: ACHIEVEMENT CHECKER ---
   useEffect(() => {
     if (!user || isSimMode) return;
 
@@ -1554,10 +1831,10 @@ export default function App() {
                   const billRequired = isCredit ? 0 : (strat.requiredBalance - discAlloc + strat.heldForCredit); 
                   
                   const free = (acc.currentBalance || 0) - billRequired - pending - discAlloc;
+                  
                   const isFullyAllocated = Math.abs(free) < 50 && !isCredit && !isTrackingAccount && (acc.currentBalance || 0) > 0;
                   const totalUsed = billRequired + pending + discAlloc + Math.max(0, free);
                   
-                  // --- FIX: Define variables before they are referenced in the wrapper div ---
                   let icon = <Building2 size={24}/>;
                   let colorClass = 'bg-emerald-100 text-emerald-600';
                   let borderColor = 'border-slate-200 dark:border-slate-800';
@@ -1617,7 +1894,16 @@ export default function App() {
                             
                             {acc.isDiscretionary ? (
                                 <div className="flex items-center gap-2">
-                                    <span className="text-purple-500 font-bold">Available: {Money.format(free + discAlloc)}</span>
+                                    <span 
+                                      onClick={(e) => { 
+                                        e.stopPropagation(); 
+                                        if (free < 0) setDriftContext({ account: acc, freeAmount: free }); 
+                                      }}
+                                      className={`font-bold transition-colors ${free < 0 ? 'text-red-500 cursor-pointer hover:underline hover:text-red-600' : 'text-purple-500'}`}
+                                      title={free < 0 ? "Click to fix overallocation" : ""}
+                                    >
+                                       {free < 0 ? `Overallocated: ${Money.format(free)}` : `Available: ${Money.format(free + discAlloc)}`}
+                                    </span>
                                     <button 
                                         onClick={(e) => { e.stopPropagation(); setShowDiscLog(true); }}
                                         className="p-1 bg-purple-100 text-purple-600 rounded-full hover:bg-purple-200 transition-colors"
@@ -1627,7 +1913,16 @@ export default function App() {
                                     </button>
                                 </div>
                             ) : (
-                                <span className={free < 0 ? "text-red-500 font-bold" : "text-emerald-500"}>{free < 0 ? 'Overallocated: ' : 'Free: '}{Money.format(free)}</span>
+                                <span 
+                                  onClick={(e) => { 
+                                    e.stopPropagation(); 
+                                    if (free !== 0) setDriftContext({ account: acc, freeAmount: free }); 
+                                  }}
+                                  className={`font-bold transition-colors ${free !== 0 ? 'cursor-pointer hover:underline' : ''} ${free < 0 ? "text-red-500 hover:text-red-600" : "text-emerald-500 hover:text-emerald-600"}`}
+                                  title={free !== 0 ? "Click to resolve drift" : "Zero-based!"}
+                                >
+                                  {free < 0 ? 'Overallocated: ' : 'Free: '}{Money.format(free)}
+                                </span>
                             )}
                           </div>
                         </div>
@@ -1648,21 +1943,47 @@ export default function App() {
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 h-64">
                    <div className="bg-white dark:bg-slate-900 p-5 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm flex flex-col min-w-0 relative group overflow-hidden">
                       <div className="flex justify-between items-start mb-2">
-                        <div><h3 className="font-bold text-sm text-slate-800 dark:text-white">Net Worth Trend</h3><p className="text-[10px] text-slate-500">History (Daily Audits)</p></div>
-                        <div className="p-1.5 bg-emerald-50 text-emerald-600 rounded-lg"><Activity size={16}/></div>
+                        <div>
+                            <h3 className="font-bold text-sm text-slate-800 dark:text-white">Net Worth Trend</h3>
+                            <p className="text-[10px] text-slate-500">History (Daily Audits)</p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <select 
+                                value={netWorthTimeframe} 
+                                onChange={(e) => setNetWorthTimeframe(Number(e.target.value))} 
+                                className="text-xs font-bold text-emerald-600 bg-emerald-50 dark:bg-emerald-900/30 border border-emerald-200 dark:border-emerald-800 rounded-lg px-2 py-1 outline-none cursor-pointer"
+                            >
+                                <option value={7}>Last 7 Audits</option>
+                                <option value={14}>Last 14 Audits</option>
+                                <option value={30}>Last 30 Audits</option>
+                                <option value={90}>Last 90 Audits</option>
+                            </select>
+                        </div>
                       </div>
-                      <div className="flex-1 min-h-0 -ml-2"><LiquidityTrendChart snapshots={snapshots} /></div>
+                      <div className="flex-1 min-h-0 -ml-2"><LiquidityTrendChart snapshots={snapshots} timeframe={netWorthTimeframe} /></div>
                    </div>
 
                    <div onClick={() => setActiveTab('budget')} className="bg-white dark:bg-slate-900 p-5 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm flex flex-col min-w-0 relative cursor-pointer hover:border-blue-400 transition-colors group overflow-hidden">
                       <div className="flex justify-between items-start mb-2">
-                        <div><h3 className="font-bold text-sm text-slate-800 dark:text-white group-hover:text-blue-600 transition-colors">30-Day Cash Flow</h3><p className="text-[10px] text-slate-500">Projected Balance</p></div>
+                        <div>
+                            <h3 className="font-bold text-sm text-slate-800 dark:text-white group-hover:text-blue-600 transition-colors">Cash Flow Forecast</h3>
+                            <p className="text-[10px] text-slate-500">Projected Balance</p>
+                        </div>
                         <div className="flex items-center gap-2">
-                           <span className="text-[10px] font-bold text-blue-500 bg-blue-50 px-2 py-0.5 rounded-full opacity-0 group-hover:opacity-100 transition-opacity">View Calendar</span>
-                           <div className="p-1.5 bg-blue-50 text-blue-600 rounded-lg"><TrendingUp size={16}/></div>
+                           <select 
+                               onClick={(e) => e.stopPropagation()}
+                               value={cashFlowTimeframe} 
+                               onChange={(e) => setCashFlowTimeframe(Number(e.target.value))} 
+                               className="text-xs font-bold text-blue-600 bg-blue-50 dark:bg-blue-900/30 border border-blue-200 dark:border-blue-800 rounded-lg px-2 py-1 outline-none cursor-pointer"
+                           >
+                               <option value={14}>Next 14 Days</option>
+                               <option value={30}>Next 30 Days</option>
+                               <option value={90}>Next 90 Days</option>
+                               <option value={180}>Next 6 Months</option>
+                           </select>
                         </div>
                       </div>
-                      <div className="flex-1 min-h-0 -ml-2"><CashFlowForecast accounts={accounts} incomes={derivedIncomes} expenses={expenses} /></div>
+                      <div className="flex-1 min-h-0 -ml-2"><CashFlowForecast accounts={accounts} incomes={derivedIncomes} expenses={expenses} timeframe={cashFlowTimeframe} /></div>
                    </div>
                 </div>
 
@@ -1860,14 +2181,14 @@ export default function App() {
                         <h3 className="font-bold text-slate-700 dark:text-slate-300">Recently Paid Bills</h3>
                     </div>
                     <div className="divide-y divide-slate-100 dark:divide-slate-800">
-                        {transactions.filter(t => (t.type === 'bill_paid' || t.type === 'expense_cleared' || t.type === 'expense') && t.type !== 'voided').length === 0 && <div className="p-8 text-center text-slate-400">No recent payments found.</div>}
-                        {transactions.filter(t => (t.type === 'bill_paid' || t.type === 'expense_cleared' || t.type === 'expense') && t.type !== 'voided').map(t => (
+                        {transactions.filter(t => t.type === 'bill_paid' || t.type === 'expense_cleared' && t.type !== 'voided').length === 0 && <div className="p-8 text-center text-slate-400">No recent payments found.</div>}
+                        {transactions.filter(t => (t.type === 'bill_paid' || t.type === 'expense_cleared') && t.type !== 'voided').map(t => (
                           <div key={t.id} className="flex justify-between items-center p-4 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors">
                               <div className="flex items-center gap-3">
                                 <div className="p-2 bg-emerald-100 text-emerald-600 rounded-full"><Check size={16}/></div>
                                 <div>
                                     <div className="font-bold text-slate-800 dark:text-white">{t.itemName}</div>
-                                    <div className="text-xs text-slate-500">{t.createdAt ? new Date(t.createdAt.seconds * 1000).toLocaleDateString() : 'Recent'}</div>
+                                    <div className="text-xs text-slate-500">{new Date(t.createdAt?.seconds * 1000).toLocaleDateString()}</div>
                                 </div>
                               </div>
                               <div className="flex items-center gap-4">
@@ -1894,12 +2215,15 @@ export default function App() {
                       <h3 className="text-sm font-bold text-slate-400 uppercase tracking-widest border-b border-slate-200 dark:border-slate-800 pb-2">{groupType}</h3>
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                         {groupAccounts.map(acc => {
-                          const isCredit = acc.type === 'credit';
-                          let borderColorClass = 'border-slate-200';
-                          if (isCredit) borderColorClass = 'border-orange-200 dark:border-orange-900';
                           
+                          const isTrackingAccount = ['loan', 'investment'].includes(acc.type);
+                          let borderColor = 'border-slate-200 dark:border-slate-800';
+                          if (acc.type === 'credit') borderColor = 'border-orange-200 dark:border-orange-900';
+                          else if (acc.type === 'loan') borderColor = 'border-orange-200 dark:border-orange-900';
+                          else if (acc.type === 'investment') borderColor = 'border-purple-200 dark:border-purple-900';
+
                           return (
-                            <div key={acc.id} onClick={() => { if(acc.type === 'credit') setPayCardAccount(acc); else setBreakdownModal({ accountId: acc.id, name: acc.name }); }} className={`bg-white dark:bg-slate-900 p-6 rounded-2xl border ${borderColorClass} shadow-sm cursor-pointer hover:border-emerald-500 transition-colors ${acc.isHidden ? 'opacity-50 border-dashed' : ''}`}>
+                            <div key={acc.id} onClick={() => { if(acc.type === 'credit') setPayCardAccount(acc); else if (!isTrackingAccount) setBreakdownModal({ accountId: acc.id, name: acc.name }); }} className={`bg-white dark:bg-slate-900 p-6 rounded-2xl border ${borderColor} shadow-sm cursor-pointer hover:border-emerald-500 transition-colors ${acc.isHidden ? 'opacity-50 border-slate-200 border-dashed' : 'border-slate-200'}`}>
                               <div className="flex justify-between items-center">
                                 <div className="flex items-center gap-4">
                                   <div className="p-3 bg-slate-100 dark:bg-slate-800 rounded-xl"><Building2 size={24} className="text-slate-600 dark:text-slate-400"/></div>
@@ -1942,6 +2266,7 @@ export default function App() {
       </main>
 
       <SpeedDial onAdd={(type) => { setModalType(type); setModalContext(type); }} />
+      
       <UnifiedEntryModal 
           isOpen={!!modalType} 
           onClose={() => { setModalType(null); setEditingItem(null); setModalContext(null); }} 
@@ -2032,6 +2357,15 @@ export default function App() {
         isOpen={showDiscLog}
         onClose={() => setShowDiscLog(false)}
         onConfirm={handleLogDiscretionary}
+      />
+
+      <DriftResolverModal 
+        isOpen={!!driftContext}
+        onClose={() => setDriftContext(null)}
+        context={driftContext}
+        expenses={expenses}
+        accounts={accounts}
+        onResolve={handleDriftAdjustment}
       />
 
       <ToastContainer toasts={toasts} removeToast={(id) => setToasts(prev => prev.filter(t => t.id !== id))} />
